@@ -1,0 +1,225 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id           String      @id @default(uuid())
+  username     String      @unique
+  email        String      @unique
+  passwordHash String
+  name         String
+  roleId       String
+  role         Role        @relation(fields: [roleId], references: [id])
+  active       Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  sales        Sale[]
+  auditLogs    AuditLog[]
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+  isSystem    Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  users       User[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+  module      String
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model Bike {
+  id                 String               @id @default(uuid())
+  type               String               @default("BRAND_NEW") // BRAND_NEW, USED
+  modelName          String
+  engineNumber       String               @unique
+  chassisNumber      String               @unique
+  color              String
+  modelYear          Int
+  batchNumber        String?
+  dealerInvoicePrice Float                @default(0)
+  retailPrice        Float                @default(0)
+  status             String               @default("IN_STOCK") // IN_STOCK, RESERVED, SOLD, PENDING_DELIVERY
+  marketTarget       String               @default("BOTH") // B2B, B2C, BOTH
+
+  // Used Bike specific attributes
+  registrationNumber   String?
+  prevOwnerName        String?
+  prevOwnerPhone       String?
+  prevOwnerCnic        String?
+  conditionGrade       String?            // GRADE_A, GRADE_B, GRADE_C
+  purchaseCost         Float?             @default(0)
+  refurbishmentCost    Float?             @default(0)
+  expectedSellingPrice Float?             @default(0)
+
+  notes              String?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  sales              Sale[]
+}
+
+model Sale {
+  id                 String                @id @default(uuid())
+  invoiceNumber      String                @unique
+  saleType           String                @default("B2C") // B2C, B2B
+  bikeId             String
+  bike               Bike                  @relation(fields: [bikeId], references: [id])
+  customerName       String
+  customerPhone      String
+  customerCnic       String?
+  customerAddress    String?
+  customerType       String                @default("RETAIL") // RETAIL, DEALER, WORKSHOP
+  salePrice          Float
+  discount           Float                 @default(0)
+  tax                Float                 @default(0)
+  finalAmount        Float
+  paymentType        String                @default("CASH") // CASH, BANK_TRANSFER, CHEQUE, CREDIT_INSTALLMENT
+  initialDeposit     Float                 @default(0)
+  remainingBalance   Float                 @default(0)
+  status             String                @default("COMPLETED") // COMPLETED, PENDING_PAYMENT, CANCELLED
+  saleDate           DateTime              @default(now())
+  createdAt          DateTime              @default(now())
+  createdById        String
+  createdBy          User                  @relation(fields: [createdById], references: [id])
+  installments       InstallmentSchedule[]
+  payments           PaymentTransaction[]
+  documents          MotorcycleDocument[]
+}
+
+model InstallmentSchedule {
+  id                String               @id @default(uuid())
+  saleId            String
+  sale              Sale                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  installmentNumber Int
+  dueDate           DateTime
+  amount            Float
+  paidAmount        Float                @default(0)
+  status            String               @default("PENDING") // PENDING, PAID, OVERDUE
+  paidDate          DateTime?
+  notes             String?
+  payments          PaymentTransaction[]
+}
+
+model PaymentTransaction {
+  id            String               @id @default(uuid())
+  saleId        String
+  sale          Sale                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  installmentId String?
+  installment   InstallmentSchedule? @relation(fields: [installmentId], references: [id])
+  amount        Float
+  paymentMethod String               @default("CASH") // CASH, BANK_TRANSFER, CHEQUE
+  referenceNumber String?
+  paymentDate   DateTime             @default(now())
+  notes         String?
+}
+
+model MotorcycleDocument {
+  id               String   @id @default(uuid())
+  saleId           String
+  sale             Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  docType          String   // SALES_CERTIFICATE, DELIVERY_LETTER_GATE_PASS, BOOK_TRANSFER_REQUEST, ALLOTMENT_LETTER, REGISTRATION_APPLICATION
+  paperworkStatus  String   @default("PENDING_MANUFACTURER") // PENDING_MANUFACTURER, PROCESSING_EXCISE, READY_FOR_PICKUP, DELIVERED
+  statusNotes      String?
+  issuedAt         DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model Part {
+  id                 String              @id @default(uuid())
+  partCode           String              @unique
+  partName           String
+  compatibilityModel String
+  wholesaleCost      Float
+  b2bSellingPrice    Float
+  quantity           Int                 @default(0)
+  reorderThreshold   Int                 @default(5)
+  category           String?
+  location           String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  orderItems         PartOrderItem[]
+  poItems            VendorPOItem[]
+}
+
+model PartOrder {
+  id             String          @id @default(uuid())
+  orderNumber    String          @unique
+  customerName   String
+  customerType   String          @default("SECONDARY_WORKSHOP") // SECONDARY_WORKSHOP, MECHANIC, PARTNER_DEALER
+  contactNumber  String
+  totalAmount    Float
+  status         String          @default("COMPLETED") // PENDING, COMPLETED, CANCELLED
+  notes          String?
+  createdAt      DateTime        @default(now())
+  items          PartOrderItem[]
+}
+
+model PartOrderItem {
+  id        String    @id @default(uuid())
+  orderId   String
+  order     PartOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  partId    String
+  part      Part      @relation(fields: [partId], references: [id])
+  quantity  Int
+  unitPrice Float
+  subtotal  Float
+}
+
+model VendorPO {
+  id             String         @id @default(uuid())
+  poNumber       String         @unique
+  vendorName     String
+  contactNumber  String?
+  status         String         @default("DRAFT") // DRAFT, ORDERED, RECEIVED, CANCELLED
+  totalAmount    Float          @default(0)
+  notes          String?
+  orderedAt      DateTime?
+  receivedAt     DateTime?
+  createdAt      DateTime       @default(now())
+  items          VendorPOItem[]
+}
+
+model VendorPOItem {
+  id               String   @id @default(uuid())
+  poId             String
+  po               VendorPO @relation(fields: [poId], references: [id], onDelete: Cascade)
+  partId           String
+  part             Part     @relation(fields: [partId], references: [id])
+  quantityOrdered  Int
+  quantityReceived Int      @default(0)
+  unitCost         Float
+  subtotal         Float
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  module    String
+  details   String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+}
