@@ -1,16 +1,21 @@
 import { Router, Response } from 'express';
 import { prisma } from '../lib/prisma.js';
 import { authenticateToken, requirePermission, AuthenticatedRequest, logAuditEvent } from '../middleware/auth.js';
+import { validateBody } from '../middleware/validate.js';
+import { createBikeSchema, updateBikeSchema } from '../validation/schemas.js';
 
 const router = Router();
 router.use(authenticateToken);
 
-// GET /api/bikes - list bikes with filters
+// GET /api/bikes - list bikes with filters and optional pagination
 router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const { type, status, marketTarget, search } = req.query;
+    const { type, status, marketTarget, search, page, limit = '20', includeDeleted } = req.query;
 
     const where: any = {};
+    if (includeDeleted !== 'true') {
+      where.isDeleted = false;
+    }
     if (type) where.type = String(type);
     if (status) where.status = String(status);
     if (marketTarget) where.marketTarget = String(marketTarget);
@@ -18,19 +23,22 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
     if (search) {
       const q = String(search).trim();
       where.OR = [
-        { modelName: { contains: q } },
-        { chassisNumber: { contains: q } },
-        { engineNumber: { contains: q } },
-        { registrationNumber: { contains: q } },
-        { batchNumber: { contains: q } }
+        { modelName: { contains: q, mode: 'insensitive' } },
+        { chassisNumber: { contains: q, mode: 'insensitive' } },
+        { engineNumber: { contains: q, mode: 'insensitive' } },
+        { registrationNumber: { contains: q, mode: 'insensitive' } },
+        { batchNumber: { contains: q, mode: 'insensitive' } }
       ];
     }
 
-    const bikes = await prisma.bike.findMany({
+    const totalCount = await prisma.bike.count({ where });
+
+    const queryOptions: any = {
       where,
       orderBy: { createdAt: 'desc' },
       include: {
         sales: {
+          where: { isDeleted: false },
           select: {
             id: true,
             invoiceNumber: true,
@@ -40,8 +48,34 @@ router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> 
           take: 1
         }
       }
-    });
+    };
 
+    if (page) {
+      const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+      const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+      queryOptions.skip = (pageNum - 1) * limitNum;
+      queryOptions.take = limitNum;
+
+      const bikes = await prisma.bike.findMany(queryOptions);
+      const totalPages = Math.ceil(totalCount / limitNum);
+
+      res.json({
+        data: bikes,
+        bikes,
+        pagination: {
+          total: totalCount,
+          page: pageNum,
+          limit: limitNum,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1
+        }
+      });
+      return;
+    }
+
+    const bikes = await prisma.bike.findMany(queryOptions);
+    res.setHeader('X-Total-Count', totalCount.toString());
     res.json(bikes);
   } catch (err: any) {
     console.error('Error fetching bikes:', err);
@@ -56,9 +90,11 @@ router.get('/search-chassis/:chassis', async (req: AuthenticatedRequest, res: Re
     const bike = await prisma.bike.findFirst({
       where: {
         chassisNumber: {
-          contains: chassis
+          contains: chassis,
+          mode: 'insensitive'
         },
-        status: 'IN_STOCK'
+        status: 'IN_STOCK',
+        isDeleted: false
       }
     });
 
@@ -81,6 +117,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response): Promise<voi
       where: { id },
       include: {
         sales: {
+          where: { isDeleted: false },
           include: {
             createdBy: { select: { name: true, username: true } },
             documents: true
@@ -89,7 +126,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response): Promise<voi
       }
     });
 
-    if (!bike) {
+    if (!bike || bike.isDeleted) {
       res.status(404).json({ error: 'Bike not found' });
       return;
     }
@@ -100,73 +137,50 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response): Promise<voi
   }
 });
 
-// POST /api/bikes - create bike (Admin or MANAGE_BIKES)
-router.post('/', requirePermission('MANAGE_BIKES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+// POST /api/bikes - Add new motorcycle to stock
+router.post('/', requirePermission('MANAGE_BIKES'), validateBody(createBikeSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const {
-      type,
-      modelName,
-      engineNumber,
-      chassisNumber,
-      color,
-      modelYear,
-      batchNumber,
-      dealerInvoicePrice,
-      retailPrice,
-      status,
-      marketTarget,
-      registrationNumber,
-      prevOwnerName,
-      prevOwnerPhone,
-      prevOwnerCnic,
-      conditionGrade,
-      purchaseCost,
-      refurbishmentCost,
-      expectedSellingPrice,
-      notes
-    } = req.body;
+    const data = req.body;
 
-    if (!modelName || !engineNumber || !chassisNumber || !color || !modelYear) {
-      res.status(400).json({ error: 'Missing essential bike details (Model, Engine, Chassis, Color, Year)' });
-      return;
-    }
-
+    // Check duplicate chassis or engine
     const existing = await prisma.bike.findFirst({
       where: {
         OR: [
-          { engineNumber: engineNumber.trim() },
-          { chassisNumber: chassisNumber.trim() }
-        ]
+          { chassisNumber: data.chassisNumber },
+          { engineNumber: data.engineNumber }
+        ],
+        isDeleted: false
       }
     });
 
     if (existing) {
-      res.status(400).json({ error: 'A motorcycle with this Engine or Chassis number already exists' });
+      res.status(409).json({ error: 'A motorcycle with this Chassis or Engine number is already in stock' });
       return;
     }
 
     const bike = await prisma.bike.create({
       data: {
-        type: type || 'BRAND_NEW',
-        modelName: modelName.trim(),
-        engineNumber: engineNumber.trim(),
-        chassisNumber: chassisNumber.trim(),
-        color: color.trim(),
-        modelYear: Number(modelYear),
-        batchNumber: batchNumber?.trim() || null,
-        dealerInvoicePrice: Number(dealerInvoicePrice) || 0,
-        retailPrice: Number(retailPrice) || 0,
-        status: status || 'IN_STOCK',
-        marketTarget: marketTarget || 'BOTH',
-        registrationNumber: registrationNumber?.trim() || null,
-        prevOwnerName: prevOwnerName?.trim() || null,
-        prevOwnerPhone: prevOwnerPhone?.trim() || null,
-        prevOwnerCnic: prevOwnerCnic?.trim() || null,
-        conditionGrade: conditionGrade || null,
-        purchaseCost: Number(purchaseCost) || 0,
-        refurbishmentCost: Number(refurbishmentCost) || 0,
-        expectedSellingPrice: Number(expectedSellingPrice) || 0,
-        notes: notes?.trim() || null
+        type: data.type,
+        modelName: data.modelName,
+        engineNumber: data.engineNumber,
+        chassisNumber: data.chassisNumber,
+        color: data.color,
+        modelYear: Number(data.modelYear),
+        batchNumber: data.batchNumber || null,
+        dealerInvoicePrice: Number(data.dealerInvoicePrice) || 0,
+        retailPrice: Number(data.retailPrice) || 0,
+        status: data.status || 'IN_STOCK',
+        marketTarget: data.marketTarget || 'BOTH',
+        registrationNumber: data.registrationNumber || null,
+        prevOwnerName: data.prevOwnerName || null,
+        prevOwnerPhone: data.prevOwnerPhone || null,
+        prevOwnerCnic: data.prevOwnerCnic || null,
+        conditionGrade: data.conditionGrade || null,
+        purchaseCost: Number(data.purchaseCost) || 0,
+        refurbishmentCost: Number(data.refurbishmentCost) || 0,
+        expectedSellingPrice: Number(data.expectedSellingPrice) || 0,
+        notes: data.notes || null,
+        isDeleted: false
       }
     });
 
@@ -174,25 +188,25 @@ router.post('/', requirePermission('MANAGE_BIKES'), async (req: AuthenticatedReq
       req.user?.userId,
       'CREATE_BIKE',
       'INVENTORY',
-      `Added ${bike.type} bike: ${bike.modelName} (Chassis: ${bike.chassisNumber})`,
+      `Registered new bike ${bike.modelName} (Chassis: ${bike.chassisNumber})`,
       req.ip
     );
 
     res.status(201).json(bike);
   } catch (err: any) {
     console.error('Error creating bike:', err);
-    res.status(500).json({ error: 'Failed to create bike record' });
+    res.status(500).json({ error: 'Failed to add bike to inventory' });
   }
 });
 
-// PUT /api/bikes/:id
-router.put('/:id', requirePermission('MANAGE_BIKES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+// PUT /api/bikes/:id - Update motorcycle details
+router.put('/:id', requirePermission('MANAGE_BIKES'), validateBody(updateBikeSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const body = req.body;
 
     const existing = await prisma.bike.findUnique({ where: { id } });
-    if (!existing) {
+    if (!existing || existing.isDeleted) {
       res.status(404).json({ error: 'Bike not found' });
       return;
     }
@@ -200,26 +214,10 @@ router.put('/:id', requirePermission('MANAGE_BIKES'), async (req: AuthenticatedR
     const updated = await prisma.bike.update({
       where: { id },
       data: {
-        type: body.type !== undefined ? body.type : existing.type,
-        modelName: body.modelName !== undefined ? body.modelName.trim() : existing.modelName,
-        engineNumber: body.engineNumber !== undefined ? body.engineNumber.trim() : existing.engineNumber,
-        chassisNumber: body.chassisNumber !== undefined ? body.chassisNumber.trim() : existing.chassisNumber,
-        color: body.color !== undefined ? body.color.trim() : existing.color,
-        modelYear: body.modelYear !== undefined ? Number(body.modelYear) : existing.modelYear,
-        batchNumber: body.batchNumber !== undefined ? body.batchNumber?.trim() : existing.batchNumber,
-        dealerInvoicePrice: body.dealerInvoicePrice !== undefined ? Number(body.dealerInvoicePrice) : existing.dealerInvoicePrice,
-        retailPrice: body.retailPrice !== undefined ? Number(body.retailPrice) : existing.retailPrice,
-        status: body.status !== undefined ? body.status : existing.status,
-        marketTarget: body.marketTarget !== undefined ? body.marketTarget : existing.marketTarget,
-        registrationNumber: body.registrationNumber !== undefined ? body.registrationNumber?.trim() : existing.registrationNumber,
-        prevOwnerName: body.prevOwnerName !== undefined ? body.prevOwnerName?.trim() : existing.prevOwnerName,
-        prevOwnerPhone: body.prevOwnerPhone !== undefined ? body.prevOwnerPhone?.trim() : existing.prevOwnerPhone,
-        prevOwnerCnic: body.prevOwnerCnic !== undefined ? body.prevOwnerCnic?.trim() : existing.prevOwnerCnic,
-        conditionGrade: body.conditionGrade !== undefined ? body.conditionGrade : existing.conditionGrade,
-        purchaseCost: body.purchaseCost !== undefined ? Number(body.purchaseCost) : existing.purchaseCost,
-        refurbishmentCost: body.refurbishmentCost !== undefined ? Number(body.refurbishmentCost) : existing.refurbishmentCost,
-        expectedSellingPrice: body.expectedSellingPrice !== undefined ? Number(body.expectedSellingPrice) : existing.expectedSellingPrice,
-        notes: body.notes !== undefined ? body.notes?.trim() : existing.notes
+        ...body,
+        ...(body.modelYear ? { modelYear: Number(body.modelYear) } : {}),
+        ...(body.dealerInvoicePrice !== undefined ? { dealerInvoicePrice: Number(body.dealerInvoicePrice) } : {}),
+        ...(body.retailPrice !== undefined ? { retailPrice: Number(body.retailPrice) } : {})
       }
     });
 
@@ -237,37 +235,80 @@ router.put('/:id', requirePermission('MANAGE_BIKES'), async (req: AuthenticatedR
   }
 });
 
-// DELETE /api/bikes/:id
+// DELETE /api/bikes/:id - Soft Delete only
 router.delete('/:id', requirePermission('MANAGE_BIKES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const bike = await prisma.bike.findUnique({
       where: { id },
-      include: { sales: true }
+      include: {
+        sales: { where: { isDeleted: false } }
+      }
     });
+
+    if (!bike || bike.isDeleted) {
+      res.status(404).json({ error: 'Bike not found' });
+      return;
+    }
+
+    if (bike.sales && bike.sales.length > 0) {
+      res.status(400).json({ error: 'Cannot delete bike with active sales records. Cancel or refund the sale first.' });
+      return;
+    }
+
+    // SOFT DELETE
+    await prisma.bike.update({
+      where: { id },
+      data: {
+        isDeleted: true,
+        deletedAt: new Date()
+      }
+    });
+
+    await logAuditEvent(
+      req.user?.userId,
+      'SOFT_DELETE_BIKE',
+      'INVENTORY',
+      `Soft deleted bike ${bike.modelName} (Chassis: ${bike.chassisNumber})`,
+      req.ip
+    );
+
+    res.json({ message: 'Bike soft deleted successfully', id });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to delete bike' });
+  }
+});
+
+// POST /api/bikes/:id/restore - Restore soft-deleted bike
+router.post('/:id/restore', requirePermission('MANAGE_BIKES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const bike = await prisma.bike.findUnique({ where: { id } });
 
     if (!bike) {
       res.status(404).json({ error: 'Bike not found' });
       return;
     }
 
-    if (bike.sales && bike.sales.length > 0) {
-      res.status(400).json({ error: 'Cannot delete bike with associated sales records. Change its status instead.' });
-      return;
-    }
+    await prisma.bike.update({
+      where: { id },
+      data: {
+        isDeleted: false,
+        deletedAt: null
+      }
+    });
 
-    await prisma.bike.delete({ where: { id } });
     await logAuditEvent(
       req.user?.userId,
-      'DELETE_BIKE',
+      'RESTORE_BIKE',
       'INVENTORY',
-      `Deleted bike ${bike.modelName} (Chassis: ${bike.chassisNumber})`,
+      `Restored bike ${bike.modelName} (Chassis: ${bike.chassisNumber})`,
       req.ip
     );
 
-    res.json({ message: 'Bike deleted successfully' });
+    res.json({ message: 'Bike restored successfully', bike });
   } catch (err: any) {
-    res.status(500).json({ error: 'Failed to delete bike' });
+    res.status(500).json({ error: 'Failed to restore bike' });
   }
 });
 

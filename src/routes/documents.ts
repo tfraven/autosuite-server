@@ -5,29 +5,35 @@ import { authenticateToken, requirePermission, AuthenticatedRequest, logAuditEve
 const router = Router();
 router.use(authenticateToken);
 
-// GET /api/documents - List all vehicle paperwork records
+// GET /api/documents - List all vehicle paperwork records with optional pagination
 router.get('/', requirePermission('MANAGE_DOCS'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const { status, docType, search } = req.query;
+    const { status, docType, search, page, limit = '20' } = req.query;
 
-    const where: any = {};
+    const where: any = {
+      sale: { isDeleted: false }
+    };
+
     if (status) where.paperworkStatus = String(status);
     if (docType) where.docType = String(docType);
 
     if (search) {
       const q = String(search).trim();
       where.sale = {
+        isDeleted: false,
         OR: [
-          { invoiceNumber: { contains: q } },
-          { customerName: { contains: q } },
-          { customerCnic: { contains: q } },
-          { bike: { chassisNumber: { contains: q } } },
-          { bike: { engineNumber: { contains: q } } }
+          { invoiceNumber: { contains: q, mode: 'insensitive' } },
+          { customerName: { contains: q, mode: 'insensitive' } },
+          { customerCnic: { contains: q, mode: 'insensitive' } },
+          { bike: { chassisNumber: { contains: q, mode: 'insensitive' } } },
+          { bike: { engineNumber: { contains: q, mode: 'insensitive' } } }
         ]
       };
     }
 
-    const docs = await prisma.motorcycleDocument.findMany({
+    const totalCount = await prisma.motorcycleDocument.count({ where });
+
+    const queryOptions: any = {
       where,
       orderBy: { updatedAt: 'desc' },
       include: {
@@ -37,8 +43,34 @@ router.get('/', requirePermission('MANAGE_DOCS'), async (req: AuthenticatedReque
           }
         }
       }
-    });
+    };
 
+    if (page) {
+      const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+      const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+      queryOptions.skip = (pageNum - 1) * limitNum;
+      queryOptions.take = limitNum;
+
+      const docs = await prisma.motorcycleDocument.findMany(queryOptions);
+      const totalPages = Math.ceil(totalCount / limitNum);
+
+      res.json({
+        data: docs,
+        documents: docs,
+        pagination: {
+          total: totalCount,
+          page: pageNum,
+          limit: limitNum,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1
+        }
+      });
+      return;
+    }
+
+    const docs = await prisma.motorcycleDocument.findMany(queryOptions);
+    res.setHeader('X-Total-Count', totalCount.toString());
     res.json(docs);
   } catch (err: any) {
     console.error('Error fetching documents:', err);
@@ -62,7 +94,7 @@ router.get('/:id', requirePermission('MANAGE_DOCS'), async (req: AuthenticatedRe
       }
     });
 
-    if (!doc) {
+    if (!doc || doc.sale?.isDeleted) {
       res.status(404).json({ error: 'Document not found' });
       return;
     }
@@ -73,7 +105,7 @@ router.get('/:id', requirePermission('MANAGE_DOCS'), async (req: AuthenticatedRe
   }
 });
 
-// PUT /api/documents/:id/status - Update paperwork status (e.g. from Honda Atlas -> Excise Office -> Pickup)
+// PUT /api/documents/:id/status - Update paperwork status
 router.put('/:id/status', requirePermission('MANAGE_DOCS'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
@@ -102,43 +134,15 @@ router.put('/:id/status', requirePermission('MANAGE_DOCS'), async (req: Authenti
     await logAuditEvent(
       req.user?.userId,
       'UPDATE_DOC_STATUS',
-      'PAPERWORK',
-      `Updated ${updated.docType} for Chassis ${updated.sale.bike.chassisNumber} to ${paperworkStatus}`,
+      'DOCUMENTS',
+      `Updated document ${updated.docType} for ${updated.sale.customerName} to ${paperworkStatus}`,
       req.ip
     );
 
     res.json(updated);
   } catch (err: any) {
+    console.error('Error updating document status:', err);
     res.status(500).json({ error: 'Failed to update document status' });
-  }
-});
-
-// POST /api/documents/generate - Generate extra documents for a sale
-router.post('/generate', requirePermission('MANAGE_DOCS'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-  try {
-    const { saleId, docType } = req.body;
-    if (!saleId || !docType) {
-      res.status(400).json({ error: 'Sale ID and Doc Type are required' });
-      return;
-    }
-
-    const doc = await prisma.motorcycleDocument.create({
-      data: {
-        saleId,
-        docType,
-        paperworkStatus: 'PENDING_MANUFACTURER',
-        statusNotes: 'Document manually created.'
-      },
-      include: {
-        sale: {
-          include: { bike: true }
-        }
-      }
-    });
-
-    res.status(201).json(doc);
-  } catch (err: any) {
-    res.status(500).json({ error: 'Failed to generate document' });
   }
 });
 

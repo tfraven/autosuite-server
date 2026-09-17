@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 90
+    },
+    "auditLog": "C:\\Users\\abida\\OneDrive\\Desktop\\Autosuite\\autosuite-server\\logs\\.2e0999fd994ffb9ff57eabd19c238bb8fa3a3509-audit.json",
+    "files": [
+        {
+            "date": 1789636923858,
+            "name": "C:\\Users\\abida\\OneDrive\\Desktop\\Autosuite\\autosuite-server\\logs\\error-2026-09-17.log",
+            "hash": "a69b7d8fae3eb342d5beed8b4c374dee500aa39f6ec55199ab1ea49de5ffa494"
+        }
+    ],
+    "hashType": "sha256"
+}

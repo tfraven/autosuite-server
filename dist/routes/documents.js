@@ -5,11 +5,13 @@ const prisma_js_1 = require("../lib/prisma.js");
 const auth_js_1 = require("../middleware/auth.js");
 const router = (0, express_1.Router)();
 router.use(auth_js_1.authenticateToken);
-// GET /api/documents - List all vehicle paperwork records
+// GET /api/documents - List all vehicle paperwork records with optional pagination
 router.get('/', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res) => {
     try {
-        const { status, docType, search } = req.query;
-        const where = {};
+        const { status, docType, search, page, limit = '20' } = req.query;
+        const where = {
+            sale: { isDeleted: false }
+        };
         if (status)
             where.paperworkStatus = String(status);
         if (docType)
@@ -17,16 +19,18 @@ router.get('/', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res
         if (search) {
             const q = String(search).trim();
             where.sale = {
+                isDeleted: false,
                 OR: [
-                    { invoiceNumber: { contains: q } },
-                    { customerName: { contains: q } },
-                    { customerCnic: { contains: q } },
-                    { bike: { chassisNumber: { contains: q } } },
-                    { bike: { engineNumber: { contains: q } } }
+                    { invoiceNumber: { contains: q, mode: 'insensitive' } },
+                    { customerName: { contains: q, mode: 'insensitive' } },
+                    { customerCnic: { contains: q, mode: 'insensitive' } },
+                    { bike: { chassisNumber: { contains: q, mode: 'insensitive' } } },
+                    { bike: { engineNumber: { contains: q, mode: 'insensitive' } } }
                 ]
             };
         }
-        const docs = await prisma_js_1.prisma.motorcycleDocument.findMany({
+        const totalCount = await prisma_js_1.prisma.motorcycleDocument.count({ where });
+        const queryOptions = {
             where,
             orderBy: { updatedAt: 'desc' },
             include: {
@@ -36,7 +40,30 @@ router.get('/', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res
                     }
                 }
             }
-        });
+        };
+        if (page) {
+            const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+            const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+            queryOptions.skip = (pageNum - 1) * limitNum;
+            queryOptions.take = limitNum;
+            const docs = await prisma_js_1.prisma.motorcycleDocument.findMany(queryOptions);
+            const totalPages = Math.ceil(totalCount / limitNum);
+            res.json({
+                data: docs,
+                documents: docs,
+                pagination: {
+                    total: totalCount,
+                    page: pageNum,
+                    limit: limitNum,
+                    totalPages,
+                    hasNext: pageNum < totalPages,
+                    hasPrev: pageNum > 1
+                }
+            });
+            return;
+        }
+        const docs = await prisma_js_1.prisma.motorcycleDocument.findMany(queryOptions);
+        res.setHeader('X-Total-Count', totalCount.toString());
         res.json(docs);
     }
     catch (err) {
@@ -59,7 +86,7 @@ router.get('/:id', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, 
                 }
             }
         });
-        if (!doc) {
+        if (!doc || doc.sale?.isDeleted) {
             res.status(404).json({ error: 'Document not found' });
             return;
         }
@@ -69,7 +96,7 @@ router.get('/:id', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, 
         res.status(500).json({ error: 'Failed to load document' });
     }
 });
-// PUT /api/documents/:id/status - Update paperwork status (e.g. from Honda Atlas -> Excise Office -> Pickup)
+// PUT /api/documents/:id/status - Update paperwork status
 router.put('/:id/status', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -92,38 +119,12 @@ router.put('/:id/status', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async
                 }
             }
         });
-        await (0, auth_js_1.logAuditEvent)(req.user?.userId, 'UPDATE_DOC_STATUS', 'PAPERWORK', `Updated ${updated.docType} for Chassis ${updated.sale.bike.chassisNumber} to ${paperworkStatus}`, req.ip);
+        await (0, auth_js_1.logAuditEvent)(req.user?.userId, 'UPDATE_DOC_STATUS', 'DOCUMENTS', `Updated document ${updated.docType} for ${updated.sale.customerName} to ${paperworkStatus}`, req.ip);
         res.json(updated);
     }
     catch (err) {
+        console.error('Error updating document status:', err);
         res.status(500).json({ error: 'Failed to update document status' });
-    }
-});
-// POST /api/documents/generate - Generate extra documents for a sale
-router.post('/generate', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res) => {
-    try {
-        const { saleId, docType } = req.body;
-        if (!saleId || !docType) {
-            res.status(400).json({ error: 'Sale ID and Doc Type are required' });
-            return;
-        }
-        const doc = await prisma_js_1.prisma.motorcycleDocument.create({
-            data: {
-                saleId,
-                docType,
-                paperworkStatus: 'PENDING_MANUFACTURER',
-                statusNotes: 'Document manually created.'
-            },
-            include: {
-                sale: {
-                    include: { bike: true }
-                }
-            }
-        });
-        res.status(201).json(doc);
-    }
-    catch (err) {
-        res.status(500).json({ error: 'Failed to generate document' });
     }
 });
 exports.default = router;

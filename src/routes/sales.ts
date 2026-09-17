@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
 import { prisma } from '../lib/prisma.js';
 import { authenticateToken, requirePermission, AuthenticatedRequest, logAuditEvent } from '../middleware/auth.js';
+import { validateBody } from '../middleware/validate.js';
+import { createSaleSchema, recordPaymentSchema } from '../validation/schemas.js';
 
 const router = Router();
 router.use(authenticateToken);
@@ -13,12 +15,15 @@ async function generateInvoiceNumber(): Promise<string> {
   return `INV-${year}-${seq}`;
 }
 
-// GET /api/sales - List sales with filters
+// GET /api/sales - List sales with filters and optional pagination
 router.get('/', requirePermission('READ_SALES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const { saleType, paymentType, status, startDate, endDate, search } = req.query;
+    const { saleType, paymentType, status, startDate, endDate, search, page, limit = '20', includeDeleted } = req.query;
 
     const where: any = {};
+    if (includeDeleted !== 'true') {
+      where.isDeleted = false;
+    }
     if (saleType) where.saleType = String(saleType);
     if (paymentType) where.paymentType = String(paymentType);
     if (status) where.status = String(status);
@@ -36,17 +41,19 @@ router.get('/', requirePermission('READ_SALES'), async (req: AuthenticatedReques
     if (search) {
       const q = String(search).trim();
       where.OR = [
-        { invoiceNumber: { contains: q } },
-        { customerName: { contains: q } },
-        { customerPhone: { contains: q } },
-        { customerCnic: { contains: q } },
-        { bike: { chassisNumber: { contains: q } } },
-        { bike: { engineNumber: { contains: q } } },
-        { bike: { modelName: { contains: q } } }
+        { invoiceNumber: { contains: q, mode: 'insensitive' } },
+        { customerName: { contains: q, mode: 'insensitive' } },
+        { customerPhone: { contains: q, mode: 'insensitive' } },
+        { customerCnic: { contains: q, mode: 'insensitive' } },
+        { bike: { chassisNumber: { contains: q, mode: 'insensitive' } } },
+        { bike: { engineNumber: { contains: q, mode: 'insensitive' } } },
+        { bike: { modelName: { contains: q, mode: 'insensitive' } } }
       ];
     }
 
-    const sales = await prisma.sale.findMany({
+    const totalCount = await prisma.sale.count({ where });
+
+    const queryOptions: any = {
       where,
       orderBy: { saleDate: 'desc' },
       include: {
@@ -62,8 +69,34 @@ router.get('/', requirePermission('READ_SALES'), async (req: AuthenticatedReques
         },
         documents: true
       }
-    });
+    };
 
+    if (page) {
+      const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+      const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+      queryOptions.skip = (pageNum - 1) * limitNum;
+      queryOptions.take = limitNum;
+
+      const sales = await prisma.sale.findMany(queryOptions);
+      const totalPages = Math.ceil(totalCount / limitNum);
+
+      res.json({
+        data: sales,
+        sales,
+        pagination: {
+          total: totalCount,
+          page: pageNum,
+          limit: limitNum,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1
+        }
+      });
+      return;
+    }
+
+    const sales = await prisma.sale.findMany(queryOptions);
+    res.setHeader('X-Total-Count', totalCount.toString());
     res.json(sales);
   } catch (err: any) {
     console.error('Error fetching sales:', err);
@@ -71,12 +104,70 @@ router.get('/', requirePermission('READ_SALES'), async (req: AuthenticatedReques
   }
 });
 
+// GET /api/sales/customer-lookup - Fast customer profile autocomplete for sales entry (Task 10)
+router.get('/customer-lookup', requirePermission('READ_SALES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { query } = req.query;
+    if (!query || String(query).trim().length < 2) {
+      res.json([]);
+      return;
+    }
+
+    const q = String(query).trim();
+
+    // Fetch recent non-deleted sales matching customer name, phone, or CNIC
+    const matchingSales = await prisma.sale.findMany({
+      where: {
+        isDeleted: false,
+        OR: [
+          { customerPhone: { contains: q, mode: 'insensitive' } },
+          { customerName: { contains: q, mode: 'insensitive' } },
+          { customerCnic: { contains: q, mode: 'insensitive' } }
+        ]
+      },
+      orderBy: { saleDate: 'desc' },
+      take: 50
+    });
+
+    const customerMap = new Map<string, any>();
+
+    for (const sale of matchingSales) {
+      const key = (sale.customerPhone || sale.customerName).trim().toLowerCase();
+      if (!customerMap.has(key)) {
+        customerMap.set(key, {
+          name: sale.customerName,
+          phone: sale.customerPhone,
+          cnic: sale.customerCnic || '',
+          address: sale.customerAddress || '',
+          customerType: sale.customerType || 'RETAIL',
+          totalPurchases: 1,
+          totalSpent: sale.finalAmount,
+          remainingBalance: sale.remainingBalance,
+          lastPurchaseDate: sale.saleDate,
+          lastInvoice: sale.invoiceNumber
+        });
+      } else {
+        const c = customerMap.get(key);
+        c.totalPurchases += 1;
+        c.totalSpent += sale.finalAmount;
+        c.remainingBalance += sale.remainingBalance;
+      }
+    }
+
+    res.json(Array.from(customerMap.values()).slice(0, 10));
+  } catch (err: any) {
+    console.error('Error in customer lookup:', err);
+    res.status(500).json({ error: 'Failed to lookup customers' });
+  }
+});
+
 // GET /api/sales/customers - Aggregated Customer Records with Ledger & Stats
 router.get('/customers', requirePermission('READ_SALES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const { search, customerType, status } = req.query;
+    const { search, customerType, status, page, limit = '20' } = req.query;
 
     const sales = await prisma.sale.findMany({
+      where: { isDeleted: false },
       orderBy: { saleDate: 'desc' },
       include: {
         bike: true,
@@ -132,7 +223,7 @@ router.get('/customers', requirePermission('READ_SALES'), async (req: Authentica
       }
 
       const now = new Date();
-      if (sale.installments?.some(i => i.status !== 'PAID' && new Date(i.dueDate) < now)) {
+      if (sale.installments?.some((i) => i.status !== 'PAID' && new Date(i.dueDate) < now)) {
         cust.hasOverdue = true;
       }
 
@@ -168,25 +259,25 @@ router.get('/customers', requirePermission('READ_SALES'), async (req: Authentica
 
     if (search) {
       const q = String(search).toLowerCase().trim();
-      customers = customers.filter(c =>
-        c.name.toLowerCase().includes(q) ||
-        c.phone.toLowerCase().includes(q) ||
-        c.cnic.toLowerCase().includes(q) ||
-        c.purchasedBikes.some((b: any) =>
-          b.chassisNumber.toLowerCase().includes(q) ||
-          b.modelName.toLowerCase().includes(q)
-        )
+      customers = customers.filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) ||
+          c.phone.toLowerCase().includes(q) ||
+          c.cnic.toLowerCase().includes(q) ||
+          c.purchasedBikes.some((b: any) =>
+            b.chassisNumber.toLowerCase().includes(q) || b.modelName.toLowerCase().includes(q)
+          )
       );
     }
 
     if (customerType) {
-      customers = customers.filter(c => c.customerType === String(customerType));
+      customers = customers.filter((c) => c.customerType === String(customerType));
     }
 
     if (status === 'DUES') {
-      customers = customers.filter(c => c.remainingBalance > 0);
+      customers = customers.filter((c) => c.remainingBalance > 0);
     } else if (status === 'SETTLED') {
-      customers = customers.filter(c => c.remainingBalance <= 0);
+      customers = customers.filter((c) => c.remainingBalance <= 0);
     }
 
     customers.sort((a, b) => new Date(b.lastPurchaseDate).getTime() - new Date(a.lastPurchaseDate).getTime());
@@ -194,18 +285,42 @@ router.get('/customers', requirePermission('READ_SALES'), async (req: Authentica
     const totalCustomers = customers.length;
     const totalRevenue = customers.reduce((acc, c) => acc + c.totalSpent, 0);
     const totalOutstanding = customers.reduce((acc, c) => acc + c.remainingBalance, 0);
-    const debtorsCount = customers.filter(c => c.remainingBalance > 0).length;
-    const dealerCount = customers.filter(c => c.customerType === 'DEALER' || c.saleType === 'B2B').length;
+    const debtorsCount = customers.filter((c) => c.remainingBalance > 0).length;
+    const dealerCount = customers.filter((c) => c.customerType === 'DEALER' || c.saleType === 'B2B').length;
+
+    const summary = {
+      totalCustomers,
+      totalRevenue,
+      totalOutstanding,
+      debtorsCount,
+      dealerCount
+    };
+
+    if (page) {
+      const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+      const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+      const paginatedCustomers = customers.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      const totalPages = Math.ceil(totalCustomers / limitNum);
+
+      res.json({
+        customers: paginatedCustomers,
+        data: paginatedCustomers,
+        summary,
+        pagination: {
+          total: totalCustomers,
+          page: pageNum,
+          limit: limitNum,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1
+        }
+      });
+      return;
+    }
 
     res.json({
       customers,
-      summary: {
-        totalCustomers,
-        totalRevenue,
-        totalOutstanding,
-        debtorsCount,
-        dealerCount
-      }
+      summary
     });
   } catch (err: any) {
     console.error('Error retrieving customer records:', err);
@@ -234,7 +349,7 @@ router.get('/:id', requirePermission('READ_SALES'), async (req: AuthenticatedReq
       }
     });
 
-    if (!sale) {
+    if (!sale || sale.isDeleted) {
       res.status(404).json({ error: 'Sale record not found' });
       return;
     }
@@ -246,11 +361,11 @@ router.get('/:id', requirePermission('READ_SALES'), async (req: AuthenticatedReq
 });
 
 // POST /api/sales - Create a sale transaction
-router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const {
       bikeId,
-      saleType, // B2C or B2B
+      saleType,
       customerName,
       customerPhone,
       customerCnic,
@@ -259,7 +374,7 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
       salePrice,
       discount = 0,
       tax = 0,
-      paymentType, // CASH, BANK_TRANSFER, CHEQUE, CREDIT_INSTALLMENT
+      paymentType,
       initialDeposit = 0,
       paymentReference,
       installmentsCount = 0,
@@ -268,14 +383,9 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
       notes
     } = req.body;
 
-    if (!bikeId || !customerName || !customerPhone || !salePrice || !paymentType) {
-      res.status(400).json({ error: 'Missing required sale transaction fields' });
-      return;
-    }
-
     // Verify bike is in stock
     const bike = await prisma.bike.findUnique({ where: { id: bikeId } });
-    if (!bike) {
+    if (!bike || bike.isDeleted) {
       res.status(404).json({ error: 'Selected motorcycle not found' });
       return;
     }
@@ -295,7 +405,6 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
     const invoiceNumber = await generateInvoiceNumber();
     const userId = req.user!.userId;
 
-    // Use Prisma transaction to atomically create sale, update bike status, create initial payment, installments & documents
     const result = await prisma.$transaction(async (tx) => {
       // 1. Update bike status to SOLD
       await tx.bike.update({
@@ -322,11 +431,12 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
           initialDeposit: depositNum,
           remainingBalance,
           status: remainingBalance > 0 ? 'PENDING_PAYMENT' : 'COMPLETED',
-          createdById: userId
+          createdById: userId,
+          isDeleted: false
         }
       });
 
-      // 3. If there is an initial deposit, record the payment transaction
+      // 3. Record initial deposit if present
       if (depositNum > 0) {
         await tx.paymentTransaction.create({
           data: {
@@ -351,7 +461,6 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
           const dueDate = new Date(baseDate);
           dueDate.setMonth(dueDate.getMonth() + (i - 1) * (installmentIntervalMonths || 1));
 
-          // Adjust last installment for rounding discrepancies
           const instAmount = i === count ? runningBalance : monthlyAmount;
           runningBalance -= instAmount;
 
@@ -368,7 +477,7 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
         }
       }
 
-      // 5. Auto-initialize the 5 standard official paperwork templates for tracking
+      // 5. Auto-initialize registration paperwork
       const docTypes = [
         'SALES_CERTIFICATE',
         'DELIVERY_LETTER_GATE_PASS',
@@ -399,7 +508,6 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
       req.ip
     );
 
-    // Fetch newly created sale with all relations
     const fullSale = await prisma.sale.findUnique({
       where: { id: result.id },
       include: {
@@ -419,23 +527,19 @@ router.post('/', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequ
 });
 
 // POST /api/sales/:id/payments - Record an installment / partial payment
-router.post('/:id/payments', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.post('/:id/payments', requirePermission('CREATE_SALE'), validateBody(recordPaymentSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const { amount, paymentMethod, referenceNumber, installmentId, notes } = req.body;
 
     const payAmount = Number(amount);
-    if (!payAmount || payAmount <= 0) {
-      res.status(400).json({ error: 'Payment amount must be greater than zero' });
-      return;
-    }
 
     const sale = await prisma.sale.findUnique({
       where: { id },
       include: { installments: true }
     });
 
-    if (!sale) {
+    if (!sale || sale.isDeleted) {
       res.status(404).json({ error: 'Sale record not found' });
       return;
     }
@@ -453,7 +557,7 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), async (req: Authe
         }
       });
 
-      // 2. If an installment was selected, update its paid amount and status
+      // 2. If installment selected, update status
       if (installmentId) {
         const inst = await tx.installmentSchedule.findUnique({ where: { id: installmentId } });
         if (inst) {
@@ -470,7 +574,7 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), async (req: Authe
         }
       }
 
-      // 3. Update remaining balance on sale
+      // 3. Update remaining balance
       const newBalance = Math.max(0, sale.remainingBalance - payAmount);
       await tx.sale.update({
         where: { id: sale.id },
@@ -502,6 +606,56 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), async (req: Authe
   } catch (err: any) {
     console.error('Error recording payment:', err);
     res.status(500).json({ error: 'Failed to record payment' });
+  }
+});
+
+// DELETE /api/sales/:id - Soft delete sale and release bike back to IN_STOCK
+router.delete('/:id', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+
+    const sale = await prisma.sale.findUnique({
+      where: { id },
+      include: { bike: true }
+    });
+
+    if (!sale || sale.isDeleted) {
+      res.status(404).json({ error: 'Sale record not found' });
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // 1. Soft delete sale
+      await tx.sale.update({
+        where: { id },
+        data: {
+          isDeleted: true,
+          deletedAt: new Date(),
+          status: 'CANCELLED'
+        }
+      });
+
+      // 2. Release bike back to IN_STOCK if not sold to someone else
+      if (sale.bikeId) {
+        await tx.bike.update({
+          where: { id: sale.bikeId },
+          data: { status: 'IN_STOCK' }
+        });
+      }
+    });
+
+    await logAuditEvent(
+      req.user?.userId,
+      'SOFT_DELETE_SALE',
+      'SALES',
+      `Soft deleted sale ${sale.invoiceNumber} for customer ${sale.customerName}. Reverted bike ${sale.bike?.modelName} to IN_STOCK.`,
+      req.ip
+    );
+
+    res.json({ message: 'Sale transaction cancelled and soft deleted successfully', id });
+  } catch (err: any) {
+    console.error('Error soft deleting sale:', err);
+    res.status(500).json({ error: 'Failed to cancel sale transaction' });
   }
 });
 

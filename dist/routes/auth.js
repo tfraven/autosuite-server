@@ -8,15 +8,13 @@ const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const prisma_js_1 = require("../lib/prisma.js");
 const jwt_js_1 = require("../lib/jwt.js");
 const auth_js_1 = require("../middleware/auth.js");
+const validate_js_1 = require("../middleware/validate.js");
+const schemas_js_1 = require("../validation/schemas.js");
 const router = (0, express_1.Router)();
 // POST /api/auth/login
-router.post('/login', async (req, res) => {
+router.post('/login', (0, validate_js_1.validateBody)(schemas_js_1.loginSchema), async (req, res) => {
     try {
         const { username, password } = req.body;
-        if (!username || !password) {
-            res.status(400).json({ error: 'Username and password are required' });
-            return;
-        }
         const user = await prisma_js_1.prisma.user.findUnique({
             where: { username },
             include: {
@@ -31,7 +29,7 @@ router.post('/login', async (req, res) => {
                 }
             }
         });
-        if (!user || !user.active) {
+        if (!user || !user.active || user.isDeleted) {
             res.status(401).json({ error: 'Invalid username or password' });
             return;
         }
@@ -96,7 +94,7 @@ router.post('/refresh', async (req, res) => {
                 }
             }
         });
-        if (!user || !user.active) {
+        if (!user || !user.active || user.isDeleted) {
             res.status(401).json({ error: 'User inactive or not found' });
             return;
         }
@@ -138,7 +136,7 @@ router.get('/me', auth_js_1.authenticateToken, async (req, res) => {
                 }
             }
         });
-        if (!user) {
+        if (!user || user.isDeleted) {
             res.status(404).json({ error: 'User not found' });
             return;
         }
@@ -154,6 +152,61 @@ router.get('/me', auth_js_1.authenticateToken, async (req, res) => {
     }
     catch (err) {
         res.status(500).json({ error: 'Failed to fetch user profile' });
+    }
+});
+// POST /api/auth/change-password
+router.post('/change-password', auth_js_1.authenticateToken, (0, validate_js_1.validateBody)(schemas_js_1.changePasswordSchema), async (req, res) => {
+    try {
+        const userId = req.user?.userId;
+        const { currentPassword, newPassword } = req.body;
+        const user = await prisma_js_1.prisma.user.findUnique({ where: { id: userId } });
+        if (!user || user.isDeleted) {
+            res.status(404).json({ error: 'User not found' });
+            return;
+        }
+        const isMatch = await bcryptjs_1.default.compare(currentPassword, user.passwordHash);
+        if (!isMatch) {
+            res.status(400).json({ error: 'Incorrect current password' });
+            return;
+        }
+        const salt = await bcryptjs_1.default.genSalt(10);
+        const newPasswordHash = await bcryptjs_1.default.hash(newPassword, salt);
+        await prisma_js_1.prisma.user.update({
+            where: { id: userId },
+            data: { passwordHash: newPasswordHash }
+        });
+        await (0, auth_js_1.logAuditEvent)(userId, 'CHANGE_PASSWORD', 'AUTH', `User ${user.username} changed their password`, req.ip);
+        res.json({ message: 'Password updated successfully' });
+    }
+    catch (err) {
+        console.error('Password change error:', err);
+        res.status(500).json({ error: 'Failed to update password' });
+    }
+});
+// PUT /api/auth/profile
+router.put('/profile', auth_js_1.authenticateToken, (0, validate_js_1.validateBody)(schemas_js_1.profileUpdateSchema), async (req, res) => {
+    try {
+        const userId = req.user?.userId;
+        const { name, email } = req.body;
+        const updated = await prisma_js_1.prisma.user.update({
+            where: { id: userId },
+            data: {
+                ...(name ? { name } : {}),
+                ...(email ? { email } : {})
+            },
+            select: {
+                id: true,
+                username: true,
+                name: true,
+                email: true,
+                role: { select: { name: true } }
+            }
+        });
+        await (0, auth_js_1.logAuditEvent)(userId, 'UPDATE_PROFILE', 'AUTH', `User updated profile details`, req.ip);
+        res.json({ message: 'Profile updated successfully', user: updated });
+    }
+    catch (err) {
+        res.status(500).json({ error: 'Failed to update profile' });
     }
 });
 exports.default = router;

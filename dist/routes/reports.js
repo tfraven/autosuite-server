@@ -26,15 +26,16 @@ function formatHeaderRow(row) {
     });
     row.height = 26;
 }
-// GET /api/reports/dashboard - Aggregated stats for the dashboard
+// GET /api/reports/dashboard - Aggregated stats for the dashboard and analytics
 router.get('/dashboard', async (_req, res) => {
     try {
-        const [totalBikes, inStockBikes, soldBikes, totalSalesCount, salesData, lowStockPartsCount, pendingPaperworkCount, recentSales] = await Promise.all([
-            prisma_js_1.prisma.bike.count(),
-            prisma_js_1.prisma.bike.count({ where: { status: 'IN_STOCK' } }),
-            prisma_js_1.prisma.bike.count({ where: { status: 'SOLD' } }),
-            prisma_js_1.prisma.sale.count(),
+        const [totalBikes, inStockBikes, soldBikes, totalSalesCount, salesData, allParts, pendingPaperworkCount, recentSales] = await Promise.all([
+            prisma_js_1.prisma.bike.count({ where: { isDeleted: false } }),
+            prisma_js_1.prisma.bike.count({ where: { status: 'IN_STOCK', isDeleted: false } }),
+            prisma_js_1.prisma.bike.count({ where: { status: 'SOLD', isDeleted: false } }),
+            prisma_js_1.prisma.sale.count({ where: { isDeleted: false } }),
             prisma_js_1.prisma.sale.findMany({
+                where: { isDeleted: false },
                 select: {
                     finalAmount: true,
                     remainingBalance: true,
@@ -44,16 +45,21 @@ router.get('/dashboard', async (_req, res) => {
                     bike: { select: { modelName: true, type: true } }
                 }
             }),
-            prisma_js_1.prisma.part.findMany().then((parts) => parts.filter((p) => p.quantity <= p.reorderThreshold).length),
+            prisma_js_1.prisma.part.findMany({ where: { isDeleted: false } }),
             prisma_js_1.prisma.motorcycleDocument.count({
-                where: { paperworkStatus: { not: 'DELIVERED' } }
+                where: {
+                    paperworkStatus: { not: 'DELIVERED' },
+                    sale: { isDeleted: false }
+                }
             }),
             prisma_js_1.prisma.sale.findMany({
+                where: { isDeleted: false },
                 take: 5,
                 orderBy: { saleDate: 'desc' },
                 include: { bike: true }
             })
         ]);
+        const lowStockPartsCount = allParts.filter((p) => p.quantity <= p.reorderThreshold).length;
         const totalRevenue = salesData.reduce((sum, s) => sum + s.finalAmount, 0);
         const totalOutstandingCredit = salesData.reduce((sum, s) => sum + s.remainingBalance, 0);
         const b2cCount = salesData.filter((s) => s.saleType === 'B2C').length;
@@ -71,7 +77,46 @@ router.get('/dashboard', async (_req, res) => {
         const topModels = Object.entries(modelSalesMap)
             .map(([model, data]) => ({ model, ...data }))
             .sort((a, b) => b.count - a.count)
-            .slice(0, 5);
+            .slice(0, 6);
+        // Monthly revenue trend (last 6 months)
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const monthlyTrendMap = {};
+        const now = new Date();
+        for (let i = 5; i >= 0; i--) {
+            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            const key = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
+            monthlyTrendMap[key] = 0;
+        }
+        for (const s of salesData) {
+            const d = new Date(s.saleDate);
+            const key = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
+            if (monthlyTrendMap[key] !== undefined) {
+                monthlyTrendMap[key] += s.finalAmount;
+            }
+        }
+        const monthlyTrends = Object.entries(monthlyTrendMap).map(([month, revenue]) => ({
+            month,
+            revenue
+        }));
+        // Payment methods breakdown
+        const paymentMethodsMap = {
+            CASH: 0,
+            BANK_TRANSFER: 0,
+            CHEQUE: 0,
+            CREDIT_INSTALLMENT: 0
+        };
+        for (const s of salesData) {
+            if (paymentMethodsMap[s.paymentType] !== undefined) {
+                paymentMethodsMap[s.paymentType] += s.finalAmount;
+            }
+            else {
+                paymentMethodsMap[s.paymentType] = s.finalAmount;
+            }
+        }
+        const paymentBreakdown = Object.entries(paymentMethodsMap).map(([method, amount]) => ({
+            method,
+            amount
+        }));
         res.json({
             totalBikes,
             inStockBikes,
@@ -84,6 +129,8 @@ router.get('/dashboard', async (_req, res) => {
             lowStockPartsCount,
             pendingPaperworkCount,
             topModels,
+            monthlyTrends,
+            paymentBreakdown,
             recentSales
         });
     }
@@ -96,6 +143,7 @@ router.get('/dashboard', async (_req, res) => {
 router.get('/export/bikes', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), async (_req, res) => {
     try {
         const bikes = await prisma_js_1.prisma.bike.findMany({
+            where: { isDeleted: false },
             orderBy: [{ status: 'asc' }, { modelName: 'asc' }]
         });
         const workbook = new exceljs_1.default.Workbook();
@@ -150,6 +198,7 @@ router.get('/export/bikes', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
 router.get('/export/parts', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), async (_req, res) => {
     try {
         const parts = await prisma_js_1.prisma.part.findMany({
+            where: { isDeleted: false },
             orderBy: { partName: 'asc' }
         });
         const workbook = new exceljs_1.default.Workbook();
@@ -159,13 +208,13 @@ router.get('/export/parts', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
             { header: 'Part Code', key: 'partCode', width: 18 },
             { header: 'Part Name', key: 'partName', width: 28 },
             { header: 'Category', key: 'category', width: 16 },
-            { header: 'Compatible Models', key: 'compatibilityModel', width: 24 },
-            { header: 'Quantity in Stock', key: 'quantity', width: 16 },
-            { header: 'Reorder Level', key: 'reorderThreshold', width: 14 },
-            { header: 'Wholesale Cost', key: 'wholesaleCost', width: 16 },
-            { header: 'B2B Selling Price', key: 'b2bSellingPrice', width: 16 },
-            { header: 'Stock Status', key: 'stockStatus', width: 16 },
-            { header: 'Bin Location', key: 'location', width: 14 }
+            { header: 'Compatibility Model', key: 'compatibilityModel', width: 24 },
+            { header: 'Quantity in Stock', key: 'quantity', width: 18 },
+            { header: 'Reorder Threshold', key: 'reorderThreshold', width: 18 },
+            { header: 'Bin / Location', key: 'location', width: 16 },
+            { header: 'Wholesale Cost (PKR)', key: 'wholesaleCost', width: 20 },
+            { header: 'B2B Selling Price (PKR)', key: 'b2bSellingPrice', width: 22 },
+            { header: 'Stock Value (PKR)', key: 'totalValue', width: 20 }
         ];
         formatHeaderRow(worksheet.getRow(1));
         parts.forEach((p) => {
@@ -176,31 +225,31 @@ router.get('/export/parts', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
                 compatibilityModel: p.compatibilityModel,
                 quantity: p.quantity,
                 reorderThreshold: p.reorderThreshold,
+                location: p.location || 'Main Storage',
                 wholesaleCost: p.wholesaleCost,
                 b2bSellingPrice: p.b2bSellingPrice,
-                stockStatus: p.quantity <= p.reorderThreshold ? 'LOW STOCK' : 'HEALTHY',
-                location: p.location || '-'
+                totalValue: p.quantity * p.wholesaleCost
             });
         });
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=AutoSuite_Spare_Parts_${Date.now()}.xlsx`);
+        res.setHeader('Content-Disposition', `attachment; filename=AutoSuite_Parts_Inventory_${Date.now()}.xlsx`);
         await workbook.xlsx.write(res);
         res.end();
     }
     catch (err) {
         console.error('Excel parts export error:', err);
-        res.status(500).json({ error: 'Failed to export parts excel sheet' });
+        res.status(500).json({ error: 'Failed to export parts inventory excel sheet' });
     }
 });
-// GET /api/reports/export/sales - Export Sales Register
+// GET /api/reports/export/sales - Export Sales and Billing Register
 router.get('/export/sales', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), async (req, res) => {
     try {
-        const { saleType, paymentMode, startDate, endDate } = req.query;
-        const where = {};
+        const { startDate, endDate, saleType, paymentType } = req.query;
+        const where = { isDeleted: false };
         if (saleType)
             where.saleType = String(saleType);
-        if (paymentMode)
-            where.paymentType = String(paymentMode);
+        if (paymentType)
+            where.paymentType = String(paymentType);
         if (startDate || endDate) {
             where.saleDate = {};
             if (startDate)
@@ -221,23 +270,26 @@ router.get('/export/sales', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
         });
         const workbook = new exceljs_1.default.Workbook();
         workbook.creator = 'AutoSuite ERP';
-        const worksheet = workbook.addWorksheet('Sales Register');
+        const worksheet = workbook.addWorksheet('Sales Billing Register');
         worksheet.columns = [
-            { header: 'Invoice #', key: 'invoiceNumber', width: 18 },
-            { header: 'Sale Date', key: 'saleDate', width: 16 },
-            { header: 'Sale Type', key: 'saleType', width: 12 },
+            { header: 'Invoice Number', key: 'invoiceNumber', width: 18 },
+            { header: 'Sale Date', key: 'saleDate', width: 14 },
+            { header: 'Channel', key: 'saleType', width: 12 },
             { header: 'Customer Name', key: 'customerName', width: 22 },
-            { header: 'Customer Phone', key: 'customerPhone', width: 18 },
-            { header: 'Bike Model', key: 'bikeModel', width: 20 },
+            { header: 'Phone Number', key: 'customerPhone', width: 16 },
+            { header: 'CNIC', key: 'customerCnic', width: 18 },
+            { header: 'Motorcycle Model', key: 'modelName', width: 22 },
             { header: 'Chassis Number', key: 'chassisNumber', width: 22 },
             { header: 'Engine Number', key: 'engineNumber', width: 22 },
-            { header: 'Sale Price', key: 'salePrice', width: 14 },
-            { header: 'Discount', key: 'discount', width: 12 },
-            { header: 'Final Amount', key: 'finalAmount', width: 16 },
+            { header: 'Sale Price (PKR)', key: 'salePrice', width: 16 },
+            { header: 'Discount (PKR)', key: 'discount', width: 14 },
+            { header: 'Tax (PKR)', key: 'tax', width: 12 },
+            { header: 'Final Amount (PKR)', key: 'finalAmount', width: 18 },
             { header: 'Payment Mode', key: 'paymentType', width: 18 },
-            { header: 'Paid Upfront', key: 'initialDeposit', width: 16 },
-            { header: 'Remaining Due', key: 'remainingBalance', width: 16 },
-            { header: 'Sales Agent', key: 'agent', width: 18 }
+            { header: 'Initial Deposit (PKR)', key: 'initialDeposit', width: 18 },
+            { header: 'Balance Due (PKR)', key: 'remainingBalance', width: 16 },
+            { header: 'Status', key: 'status', width: 14 },
+            { header: 'Issued By', key: 'createdByName', width: 18 }
         ];
         formatHeaderRow(worksheet.getRow(1));
         sales.forEach((s) => {
@@ -247,16 +299,19 @@ router.get('/export/sales', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
                 saleType: s.saleType,
                 customerName: s.customerName,
                 customerPhone: s.customerPhone,
-                bikeModel: s.bike.modelName,
+                customerCnic: s.customerCnic || '-',
+                modelName: s.bike.modelName,
                 chassisNumber: s.bike.chassisNumber,
                 engineNumber: s.bike.engineNumber,
                 salePrice: s.salePrice,
                 discount: s.discount,
+                tax: s.tax,
                 finalAmount: s.finalAmount,
-                paymentType: s.paymentType.replace('_', ' '),
+                paymentType: s.paymentType,
                 initialDeposit: s.initialDeposit,
                 remainingBalance: s.remainingBalance,
-                agent: s.createdBy.name
+                status: s.status,
+                createdByName: s.createdBy.name
             });
         });
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -266,67 +321,7 @@ router.get('/export/sales', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
     }
     catch (err) {
         console.error('Excel sales export error:', err);
-        res.status(500).json({ error: 'Failed to export sales register' });
-    }
-});
-// GET /api/reports/export/credit-ledger - Export Credit & Installment Ledger
-router.get('/export/credit-ledger', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), async (_req, res) => {
-    try {
-        const creditSales = await prisma_js_1.prisma.sale.findMany({
-            where: {
-                paymentType: 'CREDIT_INSTALLMENT',
-                remainingBalance: { gt: 0 }
-            },
-            include: {
-                bike: true,
-                installments: {
-                    orderBy: { installmentNumber: 'asc' }
-                }
-            },
-            orderBy: { remainingBalance: 'desc' }
-        });
-        const workbook = new exceljs_1.default.Workbook();
-        workbook.creator = 'AutoSuite ERP';
-        const worksheet = workbook.addWorksheet('Outstanding Credit Ledger');
-        worksheet.columns = [
-            { header: 'Invoice #', key: 'invoiceNumber', width: 18 },
-            { header: 'Customer Name', key: 'customerName', width: 22 },
-            { header: 'Phone', key: 'customerPhone', width: 16 },
-            { header: 'CNIC', key: 'customerCnic', width: 18 },
-            { header: 'Motorcycle', key: 'bike', width: 22 },
-            { header: 'Chassis No', key: 'chassisNumber', width: 22 },
-            { header: 'Total Value', key: 'finalAmount', width: 16 },
-            { header: 'Initial Deposit', key: 'initialDeposit', width: 16 },
-            { header: 'Outstanding Balance', key: 'remainingBalance', width: 20 },
-            { header: 'Pending Installments', key: 'pendingCount', width: 20 },
-            { header: 'Next Due Date', key: 'nextDueDate', width: 16 }
-        ];
-        formatHeaderRow(worksheet.getRow(1));
-        creditSales.forEach((s) => {
-            const pendingInst = s.installments.filter((i) => i.status !== 'PAID');
-            const nextInst = pendingInst[0];
-            worksheet.addRow({
-                invoiceNumber: s.invoiceNumber,
-                customerName: s.customerName,
-                customerPhone: s.customerPhone,
-                customerCnic: s.customerCnic || '-',
-                bike: `${s.bike.modelName} (${s.bike.color})`,
-                chassisNumber: s.bike.chassisNumber,
-                finalAmount: s.finalAmount,
-                initialDeposit: s.initialDeposit,
-                remainingBalance: s.remainingBalance,
-                pendingCount: `${pendingInst.length} of ${s.installments.length}`,
-                nextDueDate: nextInst ? nextInst.dueDate.toISOString().split('T')[0] : 'None'
-            });
-        });
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=AutoSuite_Credit_Ledger_${Date.now()}.xlsx`);
-        await workbook.xlsx.write(res);
-        res.end();
-    }
-    catch (err) {
-        console.error('Excel credit ledger export error:', err);
-        res.status(500).json({ error: 'Failed to export credit ledger' });
+        res.status(500).json({ error: 'Failed to export sales register excel sheet' });
     }
 });
 exports.default = router;

@@ -2,6 +2,8 @@ import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../lib/prisma.js';
 import { authenticateToken, requireRole, AuthenticatedRequest, logAuditEvent } from '../middleware/auth.js';
+import { validateBody } from '../middleware/validate.js';
+import { createUserSchema, updateUserSchema, createRoleSchema } from '../validation/schemas.js';
 
 const router = Router();
 
@@ -9,10 +11,29 @@ const router = Router();
 router.use(authenticateToken);
 router.use(requireRole(['Admin']));
 
-// GET /api/users
-router.get('/', async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+// GET /api/users - List users with optional pagination
+router.get('/', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const users = await prisma.user.findMany({
+    const { page, limit = '20', search, includeDeleted } = req.query;
+
+    const where: any = {};
+    if (includeDeleted !== 'true') {
+      where.isDeleted = false;
+    }
+
+    if (search) {
+      const q = String(search).trim();
+      where.OR = [
+        { username: { contains: q, mode: 'insensitive' } },
+        { name: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } }
+      ];
+    }
+
+    const totalCount = await prisma.user.count({ where });
+
+    const queryOptions: any = {
+      where,
       select: {
         id: true,
         username: true,
@@ -34,9 +55,49 @@ router.get('/', async (_req: AuthenticatedRequest, res: Response): Promise<void>
         }
       },
       orderBy: { createdAt: 'desc' }
-    });
+    };
 
-    const formatted = users.map((u) => ({
+    if (page) {
+      const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+      const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+      queryOptions.skip = (pageNum - 1) * limitNum;
+      queryOptions.take = limitNum;
+
+      const users = (await prisma.user.findMany(queryOptions)) as any[];
+      const formatted = users.map((u: any) => ({
+        id: u.id,
+        username: u.username,
+        name: u.name,
+        email: u.email,
+        active: u.active,
+        createdAt: u.createdAt,
+        role: {
+          id: u.role?.id,
+          name: u.role?.name,
+          description: u.role?.description,
+          permissions: (u.role?.permissions || []).map((rp: any) => rp.permission?.name)
+        }
+      }));
+
+      const totalPages = Math.ceil(totalCount / limitNum);
+
+      res.json({
+        data: formatted,
+        users: formatted,
+        pagination: {
+          total: totalCount,
+          page: pageNum,
+          limit: limitNum,
+          totalPages,
+          hasNext: pageNum < totalPages,
+          hasPrev: pageNum > 1
+        }
+      });
+      return;
+    }
+
+    const users = (await prisma.user.findMany(queryOptions)) as any[];
+    const formatted = users.map((u: any) => ({
       id: u.id,
       username: u.username,
       name: u.name,
@@ -44,48 +105,47 @@ router.get('/', async (_req: AuthenticatedRequest, res: Response): Promise<void>
       active: u.active,
       createdAt: u.createdAt,
       role: {
-        id: u.role.id,
-        name: u.role.name,
-        description: u.role.description,
-        permissions: u.role.permissions.map((rp) => rp.permission.name)
+        id: u.role?.id,
+        name: u.role?.name,
+        description: u.role?.description,
+        permissions: (u.role?.permissions || []).map((rp: any) => rp.permission?.name)
       }
     }));
 
+    res.setHeader('X-Total-Count', totalCount.toString());
     res.json(formatted);
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
 
-// POST /api/users
-router.post('/', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+// POST /api/users - Create new user account
+router.post('/', validateBody(createUserSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { username, name, email, password, roleId } = req.body;
-    if (!username || !email || !password || !roleId) {
-      res.status(400).json({ error: 'Missing required user fields' });
-      return;
-    }
 
     const existing = await prisma.user.findFirst({
       where: {
-        OR: [{ username }, { email }]
+        OR: [{ username }, { email }],
+        isDeleted: false
       }
     });
 
     if (existing) {
-      res.status(400).json({ error: 'Username or email already exists' });
+      res.status(409).json({ error: 'Username or email is already in use by an active user' });
       return;
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
       data: {
-        username,
+        username: username.toLowerCase(),
         name: name || username,
-        email,
+        email: email.toLowerCase(),
         passwordHash,
         roleId,
-        active: true
+        active: true,
+        isDeleted: false
       },
       include: {
         role: true
@@ -107,15 +167,21 @@ router.post('/', async (req: AuthenticatedRequest, res: Response): Promise<void>
   }
 });
 
-// PUT /api/users/:id
-router.put('/:id', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+// PUT /api/users/:id - Update user account
+router.put('/:id', validateBody(updateUserSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const { name, email, roleId, active, password } = req.body;
 
+    const existing = await prisma.user.findUnique({ where: { id } });
+    if (!existing || existing.isDeleted) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
     const data: any = {};
     if (name !== undefined) data.name = name;
-    if (email !== undefined) data.email = email;
+    if (email !== undefined) data.email = email.toLowerCase();
     if (roleId !== undefined) data.roleId = roleId;
     if (active !== undefined) data.active = active;
     if (password) {
@@ -143,25 +209,65 @@ router.put('/:id', async (req: AuthenticatedRequest, res: Response): Promise<voi
   }
 });
 
-// DELETE /api/users/:id
+// DELETE /api/users/:id - Soft delete user
 router.delete('/:id', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     if (req.user?.userId === id) {
-      res.status(400).json({ error: 'Cannot delete current logged-in user' });
+      res.status(400).json({ error: 'Cannot delete current logged-in account' });
       return;
     }
 
-    const deleted = await prisma.user.delete({ where: { id } });
-    await logAuditEvent(req.user?.userId, 'DELETE_USER', 'USERS', `Deleted user ${deleted.username}`, req.ip);
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user || user.isDeleted) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
 
-    res.json({ message: 'User deleted successfully' });
+    await prisma.user.update({
+      where: { id },
+      data: {
+        isDeleted: true,
+        deletedAt: new Date(),
+        active: false
+      }
+    });
+
+    await logAuditEvent(req.user?.userId, 'SOFT_DELETE_USER', 'USERS', `Soft deleted user ${user.username}`, req.ip);
+
+    res.json({ message: 'User soft deleted successfully', id });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to delete user' });
   }
 });
 
-// GET /api/users/roles
+// POST /api/users/:id/restore - Restore soft deleted user
+router.post('/:id/restore', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const user = await prisma.user.findUnique({ where: { id } });
+
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const restored = await prisma.user.update({
+      where: { id },
+      data: {
+        isDeleted: false,
+        deletedAt: null,
+        active: true
+      }
+    });
+
+    res.json({ message: 'User restored successfully', user: restored });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to restore user' });
+  }
+});
+
+// GET /api/users/roles/all
 router.get('/roles/all', async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const roles = await prisma.role.findMany({
@@ -198,18 +304,14 @@ router.get('/roles/all', async (_req: AuthenticatedRequest, res: Response): Prom
 });
 
 // POST /api/users/roles
-router.post('/roles', async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.post('/roles', validateBody(createRoleSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { name, description, permissionIds } = req.body;
-    if (!name) {
-      res.status(400).json({ error: 'Role name is required' });
-      return;
-    }
 
     const role = await prisma.role.create({
       data: {
         name,
-        description,
+        description: description || null,
         permissions: {
           create: (permissionIds || []).map((pId: string) => ({
             permission: { connect: { id: pId } }
@@ -253,9 +355,7 @@ router.put('/roles/:id', async (req: AuthenticatedRequest, res: Response): Promi
 
     // Update permissions if provided
     if (permissionIds && Array.isArray(permissionIds)) {
-      // Clear existing
       await prisma.rolePermission.deleteMany({ where: { roleId: id } });
-      // Insert new
       await prisma.rolePermission.createMany({
         data: permissionIds.map((pId: string) => ({
           roleId: id,

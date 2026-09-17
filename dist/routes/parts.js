@@ -3,6 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const prisma_js_1 = require("../lib/prisma.js");
 const auth_js_1 = require("../middleware/auth.js");
+const validate_js_1 = require("../middleware/validate.js");
+const schemas_js_1 = require("../validation/schemas.js");
 const router = (0, express_1.Router)();
 router.use(auth_js_1.authenticateToken);
 // Helper for B2B Order Number (e.g. PO-B2B-2026-0001)
@@ -17,28 +19,58 @@ async function generateVpoNumber() {
     const year = new Date().getFullYear();
     return `VPO-${year}-${String(count + 1).padStart(4, '0')}`;
 }
-// GET /api/parts - List parts with search & category
+// GET /api/parts - List parts with search, category & pagination
 router.get('/', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
     try {
-        const { search, category, lowStockOnly } = req.query;
+        const { search, category, lowStockOnly, page, limit = '20', includeDeleted } = req.query;
         const where = {};
+        if (includeDeleted !== 'true') {
+            where.isDeleted = false;
+        }
         if (category)
             where.category = String(category);
         if (search) {
             const q = String(search).trim();
             where.OR = [
-                { partCode: { contains: q } },
-                { partName: { contains: q } },
-                { compatibilityModel: { contains: q } }
+                { partCode: { contains: q, mode: 'insensitive' } },
+                { partName: { contains: q, mode: 'insensitive' } },
+                { compatibilityModel: { contains: q, mode: 'insensitive' } }
             ];
         }
-        const parts = await prisma_js_1.prisma.part.findMany({
+        const totalCount = await prisma_js_1.prisma.part.count({ where });
+        const queryOptions = {
             where,
             orderBy: { partName: 'asc' }
-        });
+        };
+        if (page) {
+            const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+            const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
+            queryOptions.skip = (pageNum - 1) * limitNum;
+            queryOptions.take = limitNum;
+            const parts = await prisma_js_1.prisma.part.findMany(queryOptions);
+            const filteredParts = lowStockOnly === 'true'
+                ? parts.filter((p) => p.quantity <= p.reorderThreshold)
+                : parts;
+            const totalPages = Math.ceil(totalCount / limitNum);
+            res.json({
+                data: filteredParts,
+                parts: filteredParts,
+                pagination: {
+                    total: totalCount,
+                    page: pageNum,
+                    limit: limitNum,
+                    totalPages,
+                    hasNext: pageNum < totalPages,
+                    hasPrev: pageNum > 1
+                }
+            });
+            return;
+        }
+        const parts = await prisma_js_1.prisma.part.findMany(queryOptions);
         const results = lowStockOnly === 'true'
             ? parts.filter((p) => p.quantity <= p.reorderThreshold)
             : parts;
+        res.setHeader('X-Total-Count', totalCount.toString());
         res.json(results);
     }
     catch (err) {
@@ -50,6 +82,7 @@ router.get('/', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, re
 router.get('/alerts/low-stock', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (_req, res) => {
     try {
         const allParts = await prisma_js_1.prisma.part.findMany({
+            where: { isDeleted: false },
             orderBy: { quantity: 'asc' }
         });
         const lowStockParts = allParts.filter((p) => p.quantity <= p.reorderThreshold);
@@ -63,34 +96,31 @@ router.get('/alerts/low-stock', (0, auth_js_1.requirePermission)('MANAGE_PARTS')
     }
 });
 // POST /api/parts - Add new part to catalog
-router.post('/', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
+router.post('/', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), (0, validate_js_1.validateBody)(schemas_js_1.createPartSchema), async (req, res) => {
     try {
-        const { partCode, partName, compatibilityModel, wholesaleCost, b2bSellingPrice, quantity, reorderThreshold, category, location } = req.body;
-        if (!partCode || !partName || !compatibilityModel || wholesaleCost === undefined || b2bSellingPrice === undefined) {
-            res.status(400).json({ error: 'Missing required part attributes' });
-            return;
-        }
-        const existing = await prisma_js_1.prisma.part.findUnique({
-            where: { partCode: partCode.trim() }
+        const data = req.body;
+        const existing = await prisma_js_1.prisma.part.findFirst({
+            where: { partCode: data.partCode, isDeleted: false }
         });
         if (existing) {
-            res.status(400).json({ error: `Part with code '${partCode}' already exists in catalog` });
+            res.status(409).json({ error: `Part code '${data.partCode}' is already registered` });
             return;
         }
         const part = await prisma_js_1.prisma.part.create({
             data: {
-                partCode: partCode.trim(),
-                partName: partName.trim(),
-                compatibilityModel: compatibilityModel.trim(),
-                wholesaleCost: Number(wholesaleCost),
-                b2bSellingPrice: Number(b2bSellingPrice),
-                quantity: Number(quantity) || 0,
-                reorderThreshold: Number(reorderThreshold) || 5,
-                category: category?.trim() || 'General',
-                location: location?.trim() || null
+                partCode: data.partCode,
+                partName: data.partName,
+                compatibilityModel: data.compatibilityModel,
+                wholesaleCost: Number(data.wholesaleCost),
+                b2bSellingPrice: Number(data.b2bSellingPrice),
+                quantity: Number(data.quantity) || 0,
+                reorderThreshold: Number(data.reorderThreshold) || 5,
+                category: data.category || null,
+                location: data.location || null,
+                isDeleted: false
             }
         });
-        await (0, auth_js_1.logAuditEvent)(req.user?.userId, 'CREATE_PART', 'SPARE_PARTS', `Added spare part: ${part.partName} (${part.partCode})`, req.ip);
+        await (0, auth_js_1.logAuditEvent)(req.user?.userId, 'CREATE_PART', 'SPARE_PARTS', `Registered spare part ${part.partName} [${part.partCode}]`, req.ip);
         res.status(201).json(part);
     }
     catch (err) {
@@ -99,27 +129,23 @@ router.post('/', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, r
     }
 });
 // PUT /api/parts/:id - Update part
-router.put('/:id', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
+router.put('/:id', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), (0, validate_js_1.validateBody)(schemas_js_1.updatePartSchema), async (req, res) => {
     try {
         const { id } = req.params;
         const body = req.body;
         const existing = await prisma_js_1.prisma.part.findUnique({ where: { id } });
-        if (!existing) {
+        if (!existing || existing.isDeleted) {
             res.status(404).json({ error: 'Part not found' });
             return;
         }
         const updated = await prisma_js_1.prisma.part.update({
             where: { id },
             data: {
-                partCode: body.partCode !== undefined ? body.partCode.trim() : existing.partCode,
-                partName: body.partName !== undefined ? body.partName.trim() : existing.partName,
-                compatibilityModel: body.compatibilityModel !== undefined ? body.compatibilityModel.trim() : existing.compatibilityModel,
-                wholesaleCost: body.wholesaleCost !== undefined ? Number(body.wholesaleCost) : existing.wholesaleCost,
-                b2bSellingPrice: body.b2bSellingPrice !== undefined ? Number(body.b2bSellingPrice) : existing.b2bSellingPrice,
-                quantity: body.quantity !== undefined ? Number(body.quantity) : existing.quantity,
-                reorderThreshold: body.reorderThreshold !== undefined ? Number(body.reorderThreshold) : existing.reorderThreshold,
-                category: body.category !== undefined ? body.category?.trim() : existing.category,
-                location: body.location !== undefined ? body.location?.trim() : existing.location
+                ...body,
+                ...(body.wholesaleCost !== undefined ? { wholesaleCost: Number(body.wholesaleCost) } : {}),
+                ...(body.b2bSellingPrice !== undefined ? { b2bSellingPrice: Number(body.b2bSellingPrice) } : {}),
+                ...(body.quantity !== undefined ? { quantity: Number(body.quantity) } : {}),
+                ...(body.reorderThreshold !== undefined ? { reorderThreshold: Number(body.reorderThreshold) } : {})
             }
         });
         res.json(updated);
@@ -128,22 +154,57 @@ router.put('/:id', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req,
         res.status(500).json({ error: 'Failed to update part' });
     }
 });
-// DELETE /api/parts/:id
+// DELETE /api/parts/:id - Soft Delete Part
 router.delete('/:id', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
     try {
         const { id } = req.params;
-        await prisma_js_1.prisma.part.delete({ where: { id } });
-        res.json({ message: 'Part deleted successfully' });
+        const part = await prisma_js_1.prisma.part.findUnique({ where: { id } });
+        if (!part || part.isDeleted) {
+            res.status(404).json({ error: 'Part not found' });
+            return;
+        }
+        await prisma_js_1.prisma.part.update({
+            where: { id },
+            data: {
+                isDeleted: true,
+                deletedAt: new Date()
+            }
+        });
+        await (0, auth_js_1.logAuditEvent)(req.user?.userId, 'SOFT_DELETE_PART', 'SPARE_PARTS', `Soft deleted spare part ${part.partName} (${part.partCode})`, req.ip);
+        res.json({ message: 'Part soft deleted successfully', id });
     }
     catch (err) {
         res.status(500).json({ error: 'Failed to delete part' });
     }
 });
+// POST /api/parts/:id/restore - Restore soft deleted part
+router.post('/:id/restore', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const part = await prisma_js_1.prisma.part.findUnique({ where: { id } });
+        if (!part) {
+            res.status(404).json({ error: 'Part not found' });
+            return;
+        }
+        await prisma_js_1.prisma.part.update({
+            where: { id },
+            data: {
+                isDeleted: false,
+                deletedAt: null
+            }
+        });
+        res.json({ message: 'Part restored successfully', part });
+    }
+    catch (err) {
+        res.status(500).json({ error: 'Failed to restore part' });
+    }
+});
 // --- B2B Parts Orders ---
-// GET /api/parts/orders - List B2B orders
+// GET /api/parts/orders/all - List B2B orders
 router.get('/orders/all', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (_req, res) => {
     try {
         const orders = await prisma_js_1.prisma.partOrder.findMany({
+            where: { isDeleted: false },
             orderBy: { createdAt: 'desc' },
             include: {
                 items: {
@@ -158,17 +219,13 @@ router.get('/orders/all', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), asyn
     }
 });
 // POST /api/parts/orders - Record B2B bulk parts order
-router.post('/orders', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
+router.post('/orders', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), (0, validate_js_1.validateBody)(schemas_js_1.createPartOrderSchema), async (req, res) => {
     try {
         const { customerName, customerType, contactNumber, items, notes } = req.body;
-        if (!customerName || !contactNumber || !items || !items.length) {
-            res.status(400).json({ error: 'Customer name, contact, and at least one item are required' });
-            return;
-        }
         // Verify stock availability
         for (const item of items) {
             const part = await prisma_js_1.prisma.part.findUnique({ where: { id: item.partId } });
-            if (!part) {
+            if (!part || part.isDeleted) {
                 res.status(404).json({ error: `Part with ID ${item.partId} not found` });
                 return;
             }
@@ -211,6 +268,7 @@ router.post('/orders', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (
                     totalAmount,
                     status: 'COMPLETED',
                     notes: notes?.trim() || null,
+                    isDeleted: false,
                     items: {
                         create: orderItemsData
                     }
@@ -228,11 +286,31 @@ router.post('/orders', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (
         res.status(500).json({ error: 'Failed to record parts order' });
     }
 });
+// DELETE /api/parts/orders/:id - Soft Delete Order
+router.delete('/orders/:id', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const order = await prisma_js_1.prisma.partOrder.findUnique({ where: { id } });
+        if (!order || order.isDeleted) {
+            res.status(404).json({ error: 'Order not found' });
+            return;
+        }
+        await prisma_js_1.prisma.partOrder.update({
+            where: { id },
+            data: { isDeleted: true, deletedAt: new Date(), status: 'CANCELLED' }
+        });
+        res.json({ message: 'Parts order soft deleted successfully', id });
+    }
+    catch (err) {
+        res.status(500).json({ error: 'Failed to delete order' });
+    }
+});
 // --- Vendor Purchase Orders (PO) ---
-// GET /api/parts/vendor-pos - List POs
+// GET /api/parts/vendor-pos/all - List POs
 router.get('/vendor-pos/all', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (_req, res) => {
     try {
         const pos = await prisma_js_1.prisma.vendorPO.findMany({
+            where: { isDeleted: false },
             orderBy: { createdAt: 'desc' },
             include: {
                 items: {
@@ -247,13 +325,9 @@ router.get('/vendor-pos/all', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), 
     }
 });
 // POST /api/parts/vendor-pos - Create Vendor PO
-router.post('/vendor-pos', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
+router.post('/vendor-pos', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), (0, validate_js_1.validateBody)(schemas_js_1.createVendorPOSchema), async (req, res) => {
     try {
         const { vendorName, contactNumber, items, notes } = req.body;
-        if (!vendorName || !items || !items.length) {
-            res.status(400).json({ error: 'Vendor name and item list are required' });
-            return;
-        }
         const poNumber = await generateVpoNumber();
         let totalAmount = 0;
         const poItemsData = [];
@@ -278,6 +352,7 @@ router.post('/vendor-pos', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), asy
                 orderedAt: new Date(),
                 totalAmount,
                 notes: notes?.trim() || null,
+                isDeleted: false,
                 items: {
                     create: poItemsData
                 }
@@ -302,7 +377,7 @@ router.put('/vendor-pos/:id/receive', (0, auth_js_1.requirePermission)('MANAGE_P
             where: { id },
             include: { items: true }
         });
-        if (!po) {
+        if (!po || po.isDeleted) {
             res.status(404).json({ error: 'Purchase order not found' });
             return;
         }
@@ -343,6 +418,25 @@ router.put('/vendor-pos/:id/receive', (0, auth_js_1.requirePermission)('MANAGE_P
     catch (err) {
         console.error('Error receiving PO:', err);
         res.status(500).json({ error: 'Failed to process PO receipt' });
+    }
+});
+// DELETE /api/parts/vendor-pos/:id - Soft delete PO
+router.delete('/vendor-pos/:id', (0, auth_js_1.requirePermission)('MANAGE_PARTS'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const po = await prisma_js_1.prisma.vendorPO.findUnique({ where: { id } });
+        if (!po || po.isDeleted) {
+            res.status(404).json({ error: 'Purchase order not found' });
+            return;
+        }
+        await prisma_js_1.prisma.vendorPO.update({
+            where: { id },
+            data: { isDeleted: true, deletedAt: new Date(), status: 'CANCELLED' }
+        });
+        res.json({ message: 'Purchase order soft deleted successfully', id });
+    }
+    catch (err) {
+        res.status(500).json({ error: 'Failed to delete PO' });
     }
 });
 exports.default = router;

@@ -17,6 +17,8 @@ model User {
   roleId       String
   role         Role        @relation(fields: [roleId], references: [id])
   active       Boolean     @default(true)
+  isDeleted    Boolean     @default(false)
+  deletedAt    DateTime?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   sales        Sale[]
@@ -76,6 +78,8 @@ model Bike {
   expectedSellingPrice Float?             @default(0)
 
   notes              String?
+  isDeleted          Boolean              @default(false)
+  deletedAt          DateTime?
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
   sales              Sale[]
@@ -100,6 +104,8 @@ model Sale {
   initialDeposit     Float                 @default(0)
   remainingBalance   Float                 @default(0)
   status             String                @default("COMPLETED") // COMPLETED, PENDING_PAYMENT, CANCELLED
+  isDeleted          Boolean               @default(false)
+  deletedAt          DateTime?
   saleDate           DateTime              @default(now())
   createdAt          DateTime              @default(now())
   createdById        String
@@ -158,6 +164,8 @@ model Part {
   reorderThreshold   Int                 @default(5)
   category           String?
   location           String?
+  isDeleted          Boolean             @default(false)
+  deletedAt          DateTime?
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   orderItems         PartOrderItem[]
@@ -173,6 +181,8 @@ model PartOrder {
   totalAmount    Float
   status         String          @default("COMPLETED") // PENDING, COMPLETED, CANCELLED
   notes          String?
+  isDeleted      Boolean         @default(false)
+  deletedAt      DateTime?
   createdAt      DateTime        @default(now())
   items          PartOrderItem[]
 }
@@ -198,6 +208,8 @@ model VendorPO {
   notes          String?
   orderedAt      DateTime?
   receivedAt     DateTime?
+  isDeleted      Boolean        @default(false)
+  deletedAt      DateTime?
   createdAt      DateTime       @default(now())
   items          VendorPOItem[]
 }
@@ -223,4 +235,11 @@ model AuditLog {
   details   String?
   ipAddress String?
   createdAt DateTime @default(now())
+}
+
+model PlatformSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
 }
