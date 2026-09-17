@@ -2,14 +2,49 @@ import winston from 'winston';
 import DailyRotateFile from 'winston-daily-rotate-file';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { Request, Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
-// Ensure logs directory exists
-const logsDir = path.resolve(process.cwd(), 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir, { recursive: true });
+// Determine a safe writable logs directory
+let logsDir: string;
+const isServerless = Boolean(
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.NETLIFY ||
+  process.env.SERVERLESS ||
+  process.env.DISABLE_FILE_LOGS === 'true'
+);
+
+if (isServerless) {
+  logsDir = path.join(os.tmpdir(), 'logs');
+} else {
+  logsDir = path.resolve(process.cwd(), 'logs');
 }
+
+// Try creating logs directory safely, fallback to os.tmpdir() if cwd is read-only (EROFS)
+let fileLoggingDisabled = false;
+try {
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+} catch (err: any) {
+  if (err.code === 'EROFS' || err.code === 'EACCES') {
+    logsDir = path.join(os.tmpdir(), 'logs');
+    try {
+      if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+      }
+    } catch (tmpErr) {
+      console.warn('[Logger] File logging disabled (read-only file system):', tmpErr);
+      fileLoggingDisabled = true;
+    }
+  } else {
+    fileLoggingDisabled = true;
+  }
+}
+
+export { logsDir };
 
 const logFormat = winston.format.combine(
   winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
@@ -18,63 +53,85 @@ const logFormat = winston.format.combine(
   winston.format.json()
 );
 
-// Daily rotate file transport for general app logs - strictly kept for at least 90 days
-const appRotateTransport = new DailyRotateFile({
-  filename: path.join(logsDir, 'application-%DATE%.log'),
-  datePattern: 'YYYY-MM-DD',
-  zippedArchive: true,
-  maxSize: '20m',
-  maxFiles: '90d',
-  level: 'info'
-});
+const mainTransports: winston.transport[] = [
+  new winston.transports.Console({
+    format: winston.format.combine(
+      winston.format.colorize(),
+      winston.format.printf(({ level, message, timestamp, stack, ...meta }) => {
+        const metaStr = Object.keys(meta).length > 1 ? ` ${JSON.stringify(meta)}` : '';
+        return `[${timestamp}] ${level}: ${stack || message}${metaStr}`;
+      })
+    )
+  })
+];
 
-// Daily rotate file transport for errors - strictly kept for at least 90 days
-const errorRotateTransport = new DailyRotateFile({
-  filename: path.join(logsDir, 'error-%DATE%.log'),
-  datePattern: 'YYYY-MM-DD',
-  zippedArchive: true,
-  maxSize: '20m',
-  maxFiles: '90d',
-  level: 'error'
-});
+const auditTransports: winston.transport[] = [
+  new winston.transports.Console({
+    format: winston.format.combine(
+      winston.format.printf(({ timestamp, message, ...meta }) => {
+        return `[AUDIT ${timestamp}] ${message} ${JSON.stringify(meta)}`;
+      })
+    )
+  })
+];
 
-// Daily rotate file transport for audit events - strictly kept for at least 90 days
-const auditRotateTransport = new DailyRotateFile({
-  filename: path.join(logsDir, 'audit-%DATE%.log'),
-  datePattern: 'YYYY-MM-DD',
-  zippedArchive: true,
-  maxSize: '20m',
-  maxFiles: '90d',
-  level: 'info'
-});
+if (!fileLoggingDisabled) {
+  try {
+    const appRotateTransport = new DailyRotateFile({
+      filename: path.join(logsDir, 'application-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '90d',
+      level: 'info'
+    });
+    appRotateTransport.on('error', (err) => {
+      console.warn('[Logger] Application log file transport error:', err.message);
+    });
+
+    const errorRotateTransport = new DailyRotateFile({
+      filename: path.join(logsDir, 'error-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '90d',
+      level: 'error'
+    });
+    errorRotateTransport.on('error', (err) => {
+      console.warn('[Logger] Error log file transport error:', err.message);
+    });
+
+    const auditRotateTransport = new DailyRotateFile({
+      filename: path.join(logsDir, 'audit-%DATE%.log'),
+      datePattern: 'YYYY-MM-DD',
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '90d',
+      level: 'info'
+    });
+    auditRotateTransport.on('error', (err) => {
+      console.warn('[Logger] Audit log file transport error:', err.message);
+    });
+
+    mainTransports.push(appRotateTransport, errorRotateTransport);
+    auditTransports.push(auditRotateTransport);
+  } catch (err: any) {
+    console.warn('[Logger] Daily rotate file transports skipped:', err?.message || err);
+  }
+}
 
 export const logger = winston.createLogger({
   level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
   format: logFormat,
   defaultMeta: { service: 'autosuite-erp' },
-  transports: [
-    appRotateTransport,
-    errorRotateTransport,
-    new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.printf(({ level, message, timestamp, stack, ...meta }) => {
-          const metaStr = Object.keys(meta).length > 1 ? ` ${JSON.stringify(meta)}` : '';
-          return `[${timestamp}] ${level}: ${stack || message}${metaStr}`;
-        })
-      )
-    })
-  ]
+  transports: mainTransports
 });
 
-// Dedicated audit file logger
 export const auditLogger = winston.createLogger({
   level: 'info',
   format: logFormat,
   defaultMeta: { service: 'autosuite-audit' },
-  transports: [
-    auditRotateTransport
-  ]
+  transports: auditTransports
 });
 
 // Express request logging middleware
