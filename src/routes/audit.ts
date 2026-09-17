@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { prisma } from '../lib/prisma.js';
+import { logsDir } from '../lib/logger.js';
 import { authenticateToken, requireRole, AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
@@ -97,7 +98,6 @@ router.get('/retention', async (_req: AuthenticatedRequest, res: Response): Prom
     });
 
     // Check disk log files
-    const logsDir = path.resolve(process.cwd(), 'logs');
     let logFiles: string[] = [];
     if (fs.existsSync(logsDir)) {
       logFiles = fs.readdirSync(logsDir);

@@ -5,8 +5,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const fs_1 = __importDefault(require("fs"));
-const path_1 = __importDefault(require("path"));
 const prisma_js_1 = require("../lib/prisma.js");
+const logger_js_1 = require("../lib/logger.js");
 const auth_js_1 = require("../middleware/auth.js");
 const router = (0, express_1.Router)();
 router.use(auth_js_1.authenticateToken);
@@ -92,10 +92,9 @@ router.get('/retention', async (_req, res) => {
             select: { createdAt: true }
         });
         // Check disk log files
-        const logsDir = path_1.default.resolve(process.cwd(), 'logs');
         let logFiles = [];
-        if (fs_1.default.existsSync(logsDir)) {
-            logFiles = fs_1.default.readdirSync(logsDir);
+        if (fs_1.default.existsSync(logger_js_1.logsDir)) {
+            logFiles = fs_1.default.readdirSync(logger_js_1.logsDir);
         }
         const retentionDays = 90;
         const cutoffDate = new Date();
@@ -117,7 +116,7 @@ router.get('/retention', async (_req, res) => {
                 recordsOlderThan90Days: logsBeyondCutoff
             },
             fileSystem: {
-                logDirectory: logsDir,
+                logDirectory: logger_js_1.logsDir,
                 activeLogFiles: logFiles.length,
                 files: logFiles.slice(-15) // last 15 files
             }
