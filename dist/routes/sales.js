@@ -517,8 +517,8 @@ router.post('/:id/payments', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0
         res.status(500).json({ error: 'Failed to record payment' });
     }
 });
-// DELETE /api/sales/:id - Soft delete sale and release bike back to IN_STOCK
-router.delete('/:id', (0, auth_js_1.requirePermission)('CREATE_SALE'), async (req, res) => {
+// DELETE /api/sales/:id - Soft delete sale and release bike back to IN_STOCK (Admin/Manager only)
+router.delete('/:id', (0, auth_js_1.requireRole)(['Admin', 'Manager']), async (req, res) => {
     try {
         const { id } = req.params;
         const sale = await prisma_js_1.prisma.sale.findUnique({

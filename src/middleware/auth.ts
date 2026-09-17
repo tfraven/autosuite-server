@@ -25,6 +25,17 @@ export async function authenticateToken(
     return;
   }
 
+  // Verify that the user still exists in the database, is active, and not deleted
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+    select: { id: true, active: true, isDeleted: true }
+  });
+
+  if (!user || !user.active || user.isDeleted) {
+    res.status(401).json({ error: 'Account is deactivated, deleted, or does not exist' });
+    return;
+  }
+
   req.user = payload;
   next();
 }

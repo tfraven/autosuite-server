@@ -18,6 +18,15 @@ async function authenticateToken(req, res, next) {
         res.status(403).json({ error: 'Invalid or expired access token' });
         return;
     }
+    // Verify that the user still exists in the database, is active, and not deleted
+    const user = await prisma_js_1.prisma.user.findUnique({
+        where: { id: payload.userId },
+        select: { id: true, active: true, isDeleted: true }
+    });
+    if (!user || !user.active || user.isDeleted) {
+        res.status(401).json({ error: 'Account is deactivated, deleted, or does not exist' });
+        return;
+    }
     req.user = payload;
     next();
 }

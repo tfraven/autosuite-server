@@ -137,9 +137,14 @@ export const createRoleSchema = z.object({
 // ================= SETTINGS SCHEMA =================
 export const updateSettingsSchema = z.object({
   dealershipName: z.string().min(1).optional(),
+  dealershipBranch: z.string().optional(),
   currency: z.string().min(1).optional(),
   invoicePrefix: z.string().min(1).optional(),
   defaultTaxRate: z.coerce.number().min(0).max(100).optional(),
   lowStockThreshold: z.coerce.number().int().min(0).optional(),
-  timezone: z.string().optional()
-});
+  timezone: z.string().optional(),
+  contactPhone: z.string().optional(),
+  ntnNumber: z.string().optional(),
+  logRetentionDays: z.coerce.number().int().min(1).optional()
+}).passthrough();
+

@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 90
+    },
+    "auditLog": "C:\\Users\\sajid\\Desktop\\AutoSuite\\server\\logs\\.030e6575fda6ac85fc1ecdcdaf073c4dad68c59c-audit.json",
+    "files": [
+        {
+            "date": 1789649260721,
+            "name": "C:\\Users\\sajid\\Desktop\\AutoSuite\\server\\logs\\audit-2026-09-17.log",
+            "hash": "461177907b21c4bc2b2f694d4f953983e545209307e1e306700335d9bd87b035"
+        }
+    ],
+    "hashType": "sha256"
+}

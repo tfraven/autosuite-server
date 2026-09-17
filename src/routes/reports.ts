@@ -273,7 +273,8 @@ router.get('/export/parts', requirePermission('EXPORT_EXCEL'), async (_req: Auth
 // GET /api/reports/export/sales - Export Sales and Billing Register
 router.get('/export/sales', requirePermission('EXPORT_EXCEL'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const { startDate, endDate, saleType, paymentType } = req.query;
+    const { startDate, endDate, saleType } = req.query;
+    const paymentType = req.query.paymentType || req.query.paymentMode;
 
     const where: any = { isDeleted: false };
     if (saleType) where.saleType = String(saleType);
@@ -355,6 +356,85 @@ router.get('/export/sales', requirePermission('EXPORT_EXCEL'), async (req: Authe
   } catch (err: any) {
     console.error('Excel sales export error:', err);
     res.status(500).json({ error: 'Failed to export sales register excel sheet' });
+  }
+});
+
+// GET /api/reports/export/credit-ledger - Export Customer Installments and Receivables Ledger
+router.get('/export/credit-ledger', requirePermission('EXPORT_EXCEL'), async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    const creditSales = await prisma.sale.findMany({
+      where: {
+        isDeleted: false,
+        paymentType: 'CREDIT_INSTALLMENT'
+      },
+      orderBy: { saleDate: 'desc' },
+      include: {
+        bike: true,
+        installments: {
+          orderBy: { installmentNumber: 'asc' }
+        },
+        createdBy: { select: { name: true } }
+      }
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'AutoSuite ERP';
+    const worksheet = workbook.addWorksheet('Installment Credit Ledger');
+
+    worksheet.columns = [
+      { header: 'Invoice Number', key: 'invoiceNumber', width: 18 },
+      { header: 'Sale Date', key: 'saleDate', width: 14 },
+      { header: 'Customer Name', key: 'customerName', width: 22 },
+      { header: 'Phone Number', key: 'customerPhone', width: 16 },
+      { header: 'CNIC', key: 'customerCnic', width: 18 },
+      { header: 'Motorcycle Model', key: 'modelName', width: 22 },
+      { header: 'Chassis Number', key: 'chassisNumber', width: 22 },
+      { header: 'Total Price (PKR)', key: 'finalAmount', width: 18 },
+      { header: 'Down Payment (PKR)', key: 'initialDeposit', width: 18 },
+      { header: 'Balance Due (PKR)', key: 'remainingBalance', width: 18 },
+      { header: 'Total Installments', key: 'totalInstallments', width: 18 },
+      { header: 'Paid Installments', key: 'paidInstallments', width: 18 },
+      { header: 'Pending / Overdue', key: 'pendingInstallments', width: 18 },
+      { header: 'Next Due Date', key: 'nextDueDate', width: 16 },
+      { header: 'Account Status', key: 'status', width: 16 }
+    ];
+
+    formatHeaderRow(worksheet.getRow(1));
+
+    creditSales.forEach((s) => {
+      const totalInst = s.installments.length;
+      const paidInst = s.installments.filter((i) => i.status === 'PAID').length;
+      const pendingInst = totalInst - paidInst;
+      const nextPending = s.installments.find((i) => i.status !== 'PAID');
+      const nextDueDateStr = nextPending ? nextPending.dueDate.toISOString().split('T')[0] : 'All Paid';
+
+      worksheet.addRow({
+        invoiceNumber: s.invoiceNumber,
+        saleDate: s.saleDate.toISOString().split('T')[0],
+        customerName: s.customerName,
+        customerPhone: s.customerPhone,
+        customerCnic: s.customerCnic || '-',
+        modelName: s.bike?.modelName || '-',
+        chassisNumber: s.bike?.chassisNumber || '-',
+        finalAmount: s.finalAmount,
+        initialDeposit: s.initialDeposit,
+        remainingBalance: s.remainingBalance,
+        totalInstallments: totalInst,
+        paidInstallments: paidInst,
+        pendingInstallments: pendingInst,
+        nextDueDate: nextDueDateStr,
+        status: s.remainingBalance <= 0 ? 'SETTLED' : 'ACTIVE_DUES'
+      });
+    });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=AutoSuite_Credit_Ledger_${Date.now()}.xlsx`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err: any) {
+    console.error('Excel credit ledger export error:', err);
+    res.status(500).json({ error: 'Failed to export installment credit ledger excel sheet' });
   }
 });
 

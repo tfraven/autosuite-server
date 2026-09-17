@@ -124,9 +124,13 @@ exports.createRoleSchema = zod_1.z.object({
 // ================= SETTINGS SCHEMA =================
 exports.updateSettingsSchema = zod_1.z.object({
     dealershipName: zod_1.z.string().min(1).optional(),
+    dealershipBranch: zod_1.z.string().optional(),
     currency: zod_1.z.string().min(1).optional(),
     invoicePrefix: zod_1.z.string().min(1).optional(),
     defaultTaxRate: zod_1.z.coerce.number().min(0).max(100).optional(),
     lowStockThreshold: zod_1.z.coerce.number().int().min(0).optional(),
-    timezone: zod_1.z.string().optional()
-});
+    timezone: zod_1.z.string().optional(),
+    contactPhone: zod_1.z.string().optional(),
+    ntnNumber: zod_1.z.string().optional(),
+    logRetentionDays: zod_1.z.coerce.number().int().min(1).optional()
+}).passthrough();

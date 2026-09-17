@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { prisma } from '../lib/prisma.js';
-import { authenticateToken, requirePermission, AuthenticatedRequest, logAuditEvent } from '../middleware/auth.js';
+import { authenticateToken, requirePermission, requireRole, AuthenticatedRequest, logAuditEvent } from '../middleware/auth.js';
 import { validateBody } from '../middleware/validate.js';
 import { createSaleSchema, recordPaymentSchema } from '../validation/schemas.js';
 
@@ -609,8 +609,8 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), validateBody(reco
   }
 });
 
-// DELETE /api/sales/:id - Soft delete sale and release bike back to IN_STOCK
-router.delete('/:id', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+// DELETE /api/sales/:id - Soft delete sale and release bike back to IN_STOCK (Admin/Manager only)
+router.delete('/:id', requireRole(['Admin', 'Manager']), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
 

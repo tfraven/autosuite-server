@@ -34,16 +34,14 @@ const allowedOrigins = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim())
     : ['http://localhost:5173', 'http://localhost:5000', 'http://127.0.0.1:5173', 'http://127.0.0.1:5000'];
 app.use((0, cors_1.default)({
-    origin: isProd
-        ? (origin, callback) => {
-            if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-                callback(null, true);
-            }
-            else {
-                callback(new Error(`Origin ${origin} not allowed by CORS`));
-            }
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin) || allowedOrigins.includes('*') || !isProd) {
+            callback(null, true);
         }
-        : '*',
+        else {
+            callback(new Error(`Origin ${origin} not allowed by CORS`));
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']

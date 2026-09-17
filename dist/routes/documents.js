@@ -29,7 +29,19 @@ router.get('/', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res
                 ]
             };
         }
-        const totalCount = await prisma_js_1.prisma.motorcycleDocument.count({ where });
+        const [totalCount, pendingCount, processingCount, readyCount, deliveredCount] = await Promise.all([
+            prisma_js_1.prisma.motorcycleDocument.count({ where }),
+            prisma_js_1.prisma.motorcycleDocument.count({ where: { sale: { isDeleted: false }, paperworkStatus: 'PENDING_MANUFACTURER' } }),
+            prisma_js_1.prisma.motorcycleDocument.count({ where: { sale: { isDeleted: false }, paperworkStatus: 'PROCESSING_EXCISE' } }),
+            prisma_js_1.prisma.motorcycleDocument.count({ where: { sale: { isDeleted: false }, paperworkStatus: 'READY_FOR_PICKUP' } }),
+            prisma_js_1.prisma.motorcycleDocument.count({ where: { sale: { isDeleted: false }, paperworkStatus: 'DELIVERED' } })
+        ]);
+        const stageCounts = {
+            PENDING_MANUFACTURER: pendingCount,
+            PROCESSING_EXCISE: processingCount,
+            READY_FOR_PICKUP: readyCount,
+            DELIVERED: deliveredCount
+        };
         const queryOptions = {
             where,
             orderBy: { updatedAt: 'desc' },
@@ -51,6 +63,7 @@ router.get('/', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res
             res.json({
                 data: docs,
                 documents: docs,
+                stageCounts,
                 pagination: {
                     total: totalCount,
                     page: pageNum,
@@ -64,7 +77,19 @@ router.get('/', (0, auth_js_1.requirePermission)('MANAGE_DOCS'), async (req, res
         }
         const docs = await prisma_js_1.prisma.motorcycleDocument.findMany(queryOptions);
         res.setHeader('X-Total-Count', totalCount.toString());
-        res.json(docs);
+        res.json({
+            data: docs,
+            documents: docs,
+            stageCounts,
+            pagination: {
+                total: totalCount,
+                page: 1,
+                limit: totalCount,
+                totalPages: 1,
+                hasNext: false,
+                hasPrev: false
+            }
+        });
     }
     catch (err) {
         console.error('Error fetching documents:', err);
