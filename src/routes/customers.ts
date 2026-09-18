@@ -34,6 +34,7 @@ function formatCustomerLedger(c: {
     .filter((s) => s.bike)
     .map((s) => ({
       id: s.bike.id,
+      saleId: s.id,
       modelName: s.bike.modelName,
       chassisNumber: s.bike.chassisNumber,
       engineNumber: s.bike.engineNumber,
