@@ -7,6 +7,70 @@ const validate_js_1 = require("../middleware/validate.js");
 const schemas_js_1 = require("../validation/schemas.js");
 const router = (0, express_1.Router)();
 router.use(auth_js_1.authenticateToken);
+function formatCustomerLedger(c) {
+    const totalPurchases = c.sales.length;
+    const totalSpent = c.sales.reduce((sum, s) => sum + s.finalAmount, 0);
+    const remainingBalance = c.sales.reduce((sum, s) => sum + s.remainingBalance, 0);
+    const totalPaid = Math.max(0, totalSpent - remainingBalance);
+    const now = new Date();
+    const hasOverdue = c.sales.some((s) => s.installments?.some((i) => i.status !== 'PAID' && new Date(i.dueDate) < now));
+    const firstPurchaseDate = c.sales.length > 0 ? c.sales[c.sales.length - 1].saleDate : c.createdAt;
+    const lastPurchaseDate = c.sales.length > 0 ? c.sales[0].saleDate : c.createdAt;
+    const purchasedBikes = c.sales
+        .filter((s) => s.bike)
+        .map((s) => ({
+        id: s.bike.id,
+        modelName: s.bike.modelName,
+        chassisNumber: s.bike.chassisNumber,
+        engineNumber: s.bike.engineNumber,
+        color: s.bike.color,
+        modelYear: s.bike.modelYear,
+        saleDate: s.saleDate,
+        invoiceNumber: s.invoiceNumber
+    }));
+    const salesList = c.sales.map((s) => ({
+        id: s.id,
+        invoiceNumber: s.invoiceNumber,
+        saleDate: s.saleDate,
+        saleType: s.saleType,
+        paymentType: s.paymentType,
+        finalAmount: s.finalAmount,
+        remainingBalance: s.remainingBalance,
+        status: s.status,
+        bikeModel: s.bike?.modelName,
+        bikeChassis: s.bike?.chassisNumber,
+        bike: s.bike
+            ? {
+                id: s.bike.id,
+                modelName: s.bike.modelName,
+                chassisNumber: s.bike.chassisNumber,
+                engineNumber: s.bike.engineNumber,
+                color: s.bike.color,
+                modelYear: s.bike.modelYear
+            }
+            : null,
+        installments: s.installments || []
+    }));
+    return {
+        id: c.id,
+        name: c.name,
+        phone: c.phone,
+        cnic: c.cnic || '',
+        address: c.address || '',
+        customerType: c.customerType,
+        saleType: c.sales[0]?.saleType || (c.customerType === 'DEALER' ? 'B2B' : 'B2C'),
+        notes: c.notes,
+        totalPurchases,
+        totalSpent,
+        totalPaid,
+        remainingBalance,
+        hasOverdue,
+        firstPurchaseDate,
+        lastPurchaseDate,
+        purchasedBikes,
+        sales: salesList
+    };
+}
 // GET /api/customers - List customers with server-side pagination, search, and ledger stats
 router.get('/', (0, auth_js_1.requirePermission)('READ_SALES'), async (req, res) => {
     try {
@@ -43,69 +107,7 @@ router.get('/', (0, auth_js_1.requirePermission)('READ_SALES'), async (req, res)
                 }
             }
         });
-        // Format customer ledger summaries
-        const now = new Date();
-        let formatted = customers.map((c) => {
-            const totalPurchases = c.sales.length;
-            const totalSpent = c.sales.reduce((sum, s) => sum + s.finalAmount, 0);
-            const remainingBalance = c.sales.reduce((sum, s) => sum + s.remainingBalance, 0);
-            const totalPaid = Math.max(0, totalSpent - remainingBalance);
-            const hasOverdue = c.sales.some((s) => s.installments?.some((i) => i.status !== 'PAID' && new Date(i.dueDate) < now));
-            const firstPurchaseDate = c.sales.length > 0 ? c.sales[c.sales.length - 1].saleDate : c.createdAt;
-            const lastPurchaseDate = c.sales.length > 0 ? c.sales[0].saleDate : c.createdAt;
-            const purchasedBikes = c.sales
-                .filter((s) => s.bike)
-                .map((s) => ({
-                id: s.bike.id,
-                modelName: s.bike.modelName,
-                chassisNumber: s.bike.chassisNumber,
-                engineNumber: s.bike.engineNumber,
-                color: s.bike.color,
-                modelYear: s.bike.modelYear,
-                saleDate: s.saleDate,
-                invoiceNumber: s.invoiceNumber
-            }));
-            const salesList = c.sales.map((s) => ({
-                id: s.id,
-                invoiceNumber: s.invoiceNumber,
-                saleDate: s.saleDate,
-                saleType: s.saleType,
-                paymentType: s.paymentType,
-                finalAmount: s.finalAmount,
-                remainingBalance: s.remainingBalance,
-                status: s.status,
-                bikeModel: s.bike?.modelName,
-                bikeChassis: s.bike?.chassisNumber,
-                bike: s.bike ? {
-                    id: s.bike.id,
-                    modelName: s.bike.modelName,
-                    chassisNumber: s.bike.chassisNumber,
-                    engineNumber: s.bike.engineNumber,
-                    color: s.bike.color,
-                    modelYear: s.bike.modelYear
-                } : null,
-                installments: s.installments || []
-            }));
-            return {
-                id: c.id,
-                name: c.name,
-                phone: c.phone,
-                cnic: c.cnic || '',
-                address: c.address || '',
-                customerType: c.customerType,
-                saleType: c.sales[0]?.saleType || (c.customerType === 'DEALER' ? 'B2B' : 'B2C'),
-                notes: c.notes,
-                totalPurchases,
-                totalSpent,
-                totalPaid,
-                remainingBalance,
-                hasOverdue,
-                firstPurchaseDate,
-                lastPurchaseDate,
-                purchasedBikes,
-                sales: salesList
-            };
-        });
+        let formatted = customers.map((c) => formatCustomerLedger(c));
         // Apply status filter: DUES vs SETTLED
         if (status === 'DUES') {
             formatted = formatted.filter((c) => c.remainingBalance > 0);
@@ -183,20 +185,7 @@ router.get('/:id', (0, auth_js_1.requirePermission)('READ_SALES'), async (req, r
             res.status(404).json({ error: 'Customer not found' });
             return;
         }
-        const totalPurchases = c.sales.length;
-        const totalSpent = c.sales.reduce((sum, s) => sum + s.finalAmount, 0);
-        const remainingBalance = c.sales.reduce((sum, s) => sum + s.remainingBalance, 0);
-        const totalPaid = Math.max(0, totalSpent - remainingBalance);
-        const now = new Date();
-        const hasOverdue = c.sales.some((s) => s.installments?.some((i) => i.status !== 'PAID' && new Date(i.dueDate) < now));
-        res.json({
-            ...c,
-            totalPurchases,
-            totalSpent,
-            totalPaid,
-            remainingBalance,
-            hasOverdue
-        });
+        res.json(formatCustomerLedger(c));
     }
     catch (err) {
         res.status(500).json({ error: 'Failed to fetch customer profile' });
