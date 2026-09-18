@@ -74,6 +74,7 @@ export const createBikeSchema = z.object({
   purchaseCost: z.coerce.number().min(0).optional().nullable(),
   refurbishmentCost: z.coerce.number().min(0).optional().nullable(),
   expectedSellingPrice: z.coerce.number().min(0).optional().nullable(),
+  receivedDate: z.string().trim().optional().nullable(),
   notes: z.string().trim().optional().nullable()
 });
 
@@ -101,12 +102,14 @@ export const createSaleSchema = z.object({
   installmentsCount: z.coerce.number().int().min(0).max(60).default(0),
   installmentIntervalMonths: z.coerce.number().int().min(1).max(12).default(1),
   firstInstallmentDueDate: z.string().optional().nullable(),
+  saleDate: z.string().trim().optional().nullable(),
   notes: z.string().trim().optional().nullable()
 });
 
 export const recordPaymentSchema = z.object({
   amount: z.coerce.number().positive('Payment amount must be greater than zero'),
   paymentMethod: z.enum(['CASH', 'BANK_TRANSFER', 'CHEQUE']).default('CASH'),
+  paymentDate: z.string().trim().optional().nullable(),
   installmentId: z.string().optional().nullable(),
   referenceNumber: z.string().trim().optional().nullable(),
   notes: z.string().trim().optional().nullable()

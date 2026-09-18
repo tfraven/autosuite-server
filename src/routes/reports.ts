@@ -156,6 +156,195 @@ router.get('/dashboard', async (_req: AuthenticatedRequest, res: Response): Prom
   }
 });
 
+// GET /api/reports/heatmaps - Aggregated matrix and calendar data for sales & user activity heatmaps
+router.get('/heatmaps', async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  try {
+    // 1. Fetch sales data (last 90 days or all valid sales)
+    const ninetyDaysAgo = new Date();
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+    ninetyDaysAgo.setHours(0, 0, 0, 0);
+
+    const [sales, auditLogs] = await Promise.all([
+      prisma.sale.findMany({
+        where: {
+          isDeleted: false,
+          saleDate: { gte: ninetyDaysAgo }
+        },
+        select: {
+          id: true,
+          saleDate: true,
+          finalAmount: true,
+          invoiceNumber: true
+        }
+      }),
+      prisma.auditLog.findMany({
+        where: {
+          createdAt: { gte: ninetyDaysAgo }
+        },
+        select: {
+          id: true,
+          action: true,
+          module: true,
+          createdAt: true,
+          userId: true,
+          user: { select: { username: true, name: true } }
+        }
+      })
+    ]);
+
+    // Build 7 x 24 hourly matrices (0: Sun, 1: Mon, ... 6: Sat)
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const salesHourlyMatrix: { day: number; dayName: string; hour: number; count: number; revenue: number }[] = [];
+    const auditHourlyMatrix: { day: number; dayName: string; hour: number; count: number }[] = [];
+
+    for (let d = 0; d < 7; d++) {
+      for (let h = 0; h < 24; h++) {
+        salesHourlyMatrix.push({ day: d, dayName: dayNames[d], hour: h, count: 0, revenue: 0 });
+        auditHourlyMatrix.push({ day: d, dayName: dayNames[d], hour: h, count: 0 });
+      }
+    }
+
+    const salesDailyMap: Record<string, { count: number; revenue: number }> = {};
+    const auditDailyMap: Record<string, { count: number }> = {};
+
+    // Generate consecutive 90 days dates
+    const dailyCalendar: { date: string; dayOfWeek: number; dayName: string; salesCount: number; salesRevenue: number; auditCount: number }[] = [];
+    const now = new Date();
+    for (let i = 89; i >= 0; i--) {
+      const dt = new Date();
+      dt.setDate(now.getDate() - i);
+      const ymd = dt.toISOString().split('T')[0];
+      const dow = dt.getDay();
+      salesDailyMap[ymd] = { count: 0, revenue: 0 };
+      auditDailyMap[ymd] = { count: 0 };
+      dailyCalendar.push({
+        date: ymd,
+        dayOfWeek: dow,
+        dayName: dayNames[dow],
+        salesCount: 0,
+        salesRevenue: 0,
+        auditCount: 0
+      });
+    }
+
+    // Populate Sales
+    let maxSalesHourlyCount = 0;
+    let maxSalesHourlyRev = 0;
+    let totalSalesRevenue = 0;
+
+    for (const s of sales) {
+      const d = new Date(s.saleDate);
+      const day = d.getDay();
+      const hour = d.getHours();
+      const ymd = d.toISOString().split('T')[0];
+
+      const idx = day * 24 + hour;
+      if (salesHourlyMatrix[idx]) {
+        salesHourlyMatrix[idx].count += 1;
+        salesHourlyMatrix[idx].revenue += s.finalAmount;
+        if (salesHourlyMatrix[idx].count > maxSalesHourlyCount) maxSalesHourlyCount = salesHourlyMatrix[idx].count;
+        if (salesHourlyMatrix[idx].revenue > maxSalesHourlyRev) maxSalesHourlyRev = salesHourlyMatrix[idx].revenue;
+      }
+
+      totalSalesRevenue += s.finalAmount;
+      if (salesDailyMap[ymd]) {
+        salesDailyMap[ymd].count += 1;
+        salesDailyMap[ymd].revenue += s.finalAmount;
+      }
+    }
+
+    // Populate Audit
+    let maxAuditHourlyCount = 0;
+    const userAuditCounts: Record<string, { name: string; username: string; count: number }> = {};
+    const actionCounts: Record<string, number> = {};
+
+    for (const a of auditLogs) {
+      const d = new Date(a.createdAt);
+      const day = d.getDay();
+      const hour = d.getHours();
+      const ymd = d.toISOString().split('T')[0];
+
+      const idx = day * 24 + hour;
+      if (auditHourlyMatrix[idx]) {
+        auditHourlyMatrix[idx].count += 1;
+        if (auditHourlyMatrix[idx].count > maxAuditHourlyCount) maxAuditHourlyCount = auditHourlyMatrix[idx].count;
+      }
+
+      if (auditDailyMap[ymd]) {
+        auditDailyMap[ymd].count += 1;
+      }
+
+      if (a.user) {
+        const uId = a.userId || a.user.username;
+        if (!userAuditCounts[uId]) {
+          userAuditCounts[uId] = { name: a.user.name, username: a.user.username, count: 0 };
+        }
+        userAuditCounts[uId].count += 1;
+      }
+
+      actionCounts[a.action] = (actionCounts[a.action] || 0) + 1;
+    }
+
+    // Fill daily calendar
+    for (const entry of dailyCalendar) {
+      if (salesDailyMap[entry.date]) {
+        entry.salesCount = salesDailyMap[entry.date].count;
+        entry.salesRevenue = salesDailyMap[entry.date].revenue;
+      }
+      if (auditDailyMap[entry.date]) {
+        entry.auditCount = auditDailyMap[entry.date].count;
+      }
+    }
+
+    // Identify peak day of week & hour
+    let peakSalesDay = { dayName: 'Monday', count: 0, revenue: 0 };
+    for (let d = 0; d < 7; d++) {
+      const daySlice = salesHourlyMatrix.filter((m) => m.day === d);
+      const dayCount = daySlice.reduce((sum, c) => sum + c.count, 0);
+      const dayRev = daySlice.reduce((sum, c) => sum + c.revenue, 0);
+      if (dayCount > peakSalesDay.count) {
+        peakSalesDay = { dayName: dayNames[d], count: dayCount, revenue: dayRev };
+      }
+    }
+
+    let peakSalesHour = { hour: 12, label: '12:00 PM', count: 0, revenue: 0 };
+    for (let h = 0; h < 24; h++) {
+      const hourSlice = salesHourlyMatrix.filter((m) => m.hour === h);
+      const hCount = hourSlice.reduce((sum, c) => sum + c.count, 0);
+      const hRev = hourSlice.reduce((sum, c) => sum + c.revenue, 0);
+      if (hCount > peakSalesHour.count) {
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        const displayH = h % 12 === 0 ? 12 : h % 12;
+        peakSalesHour = { hour: h, label: `${displayH}:00 ${ampm}`, count: hCount, revenue: hRev };
+      }
+    }
+
+    res.json({
+      sales: {
+        hourlyMatrix: salesHourlyMatrix,
+        dailyCalendar,
+        totalSales: sales.length,
+        totalRevenue: totalSalesRevenue,
+        maxHourlyCount: maxSalesHourlyCount,
+        maxHourlyRevenue: maxSalesHourlyRev,
+        peakDay: peakSalesDay,
+        peakHour: peakSalesHour
+      },
+      userActivity: {
+        hourlyMatrix: auditHourlyMatrix,
+        dailyCalendar,
+        totalActions: auditLogs.length,
+        maxHourlyCount: maxAuditHourlyCount,
+        topUsers: Object.values(userAuditCounts).sort((a, b) => b.count - a.count).slice(0, 5),
+        topActions: Object.entries(actionCounts).map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count).slice(0, 5)
+      }
+    });
+  } catch (err: any) {
+    console.error('Heatmaps generation error:', err);
+    res.status(500).json({ error: 'Failed to aggregate heatmap metrics' });
+  }
+});
+
 // GET /api/reports/export/bikes - Export Motorcycle Stock Sheet
 router.get('/export/bikes', requirePermission('EXPORT_EXCEL'), async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {

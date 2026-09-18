@@ -375,6 +375,7 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
       installmentsCount = 0,
       installmentIntervalMonths = 1,
       firstInstallmentDueDate,
+      saleDate,
       notes
     } = req.body;
 
@@ -399,6 +400,7 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
 
     const invoiceNumber = await generateInvoiceNumber();
     const userId = req.user!.userId;
+    const effectiveSaleDate = saleDate ? new Date(saleDate) : new Date();
 
     let isNewCustomerCreated = false;
 
@@ -497,6 +499,8 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
       const sale = await tx.sale.create({
         data: {
           invoiceNumber,
+          saleDate: effectiveSaleDate,
+          createdAt: effectiveSaleDate,
           saleType: saleType || 'B2C',
           bikeId,
           customerId: resolvedCustomerId || null,
@@ -526,7 +530,8 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
             amount: depositNum,
             paymentMethod: paymentType === 'CREDIT_INSTALLMENT' ? 'CASH' : paymentType,
             referenceNumber: paymentReference || null,
-            notes: paymentType === 'CREDIT_INSTALLMENT' ? 'Down Payment / Initial Deposit' : 'Full / Upfront Payment'
+            notes: paymentType === 'CREDIT_INSTALLMENT' ? 'Down Payment / Initial Deposit' : 'Full / Upfront Payment',
+            paymentDate: effectiveSaleDate
           }
         });
       }
@@ -640,9 +645,10 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
 router.post('/:id/payments', requirePermission('CREATE_SALE'), validateBody(recordPaymentSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { amount, paymentMethod, referenceNumber, installmentId, notes } = req.body;
+    const { amount, paymentMethod, referenceNumber, installmentId, paymentDate, notes } = req.body;
 
     const payAmount = Number(amount);
+    const effectivePaymentDate = paymentDate ? new Date(paymentDate) : new Date();
 
     const sale = await prisma.sale.findUnique({
       where: { id },
@@ -663,7 +669,8 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), validateBody(reco
           amount: payAmount,
           paymentMethod: paymentMethod || 'CASH',
           referenceNumber: referenceNumber || null,
-          notes: notes || null
+          notes: notes || null,
+          paymentDate: effectivePaymentDate
         }
       });
 
@@ -678,7 +685,7 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), validateBody(reco
             data: {
               paidAmount: newPaid,
               status: isFullyPaid ? 'PAID' : 'PENDING',
-              paidDate: isFullyPaid ? new Date() : inst.paidDate
+              paidDate: isFullyPaid ? effectivePaymentDate : inst.paidDate
             }
           });
         }

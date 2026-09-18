@@ -75,7 +75,16 @@ router.get('/', (0, auth_js_1.requirePermission)('READ_SALES'), async (req, res)
                 remainingBalance: s.remainingBalance,
                 status: s.status,
                 bikeModel: s.bike?.modelName,
-                bikeChassis: s.bike?.chassisNumber
+                bikeChassis: s.bike?.chassisNumber,
+                bike: s.bike ? {
+                    id: s.bike.id,
+                    modelName: s.bike.modelName,
+                    chassisNumber: s.bike.chassisNumber,
+                    engineNumber: s.bike.engineNumber,
+                    color: s.bike.color,
+                    modelYear: s.bike.modelYear
+                } : null,
+                installments: s.installments || []
             }));
             return {
                 id: c.id,

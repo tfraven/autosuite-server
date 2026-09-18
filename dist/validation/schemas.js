@@ -66,6 +66,7 @@ exports.createBikeSchema = zod_1.z.object({
     purchaseCost: zod_1.z.coerce.number().min(0).optional().nullable(),
     refurbishmentCost: zod_1.z.coerce.number().min(0).optional().nullable(),
     expectedSellingPrice: zod_1.z.coerce.number().min(0).optional().nullable(),
+    receivedDate: zod_1.z.string().trim().optional().nullable(),
     notes: zod_1.z.string().trim().optional().nullable()
 });
 exports.updateBikeSchema = exports.createBikeSchema.partial();
@@ -89,11 +90,13 @@ exports.createSaleSchema = zod_1.z.object({
     installmentsCount: zod_1.z.coerce.number().int().min(0).max(60).default(0),
     installmentIntervalMonths: zod_1.z.coerce.number().int().min(1).max(12).default(1),
     firstInstallmentDueDate: zod_1.z.string().optional().nullable(),
+    saleDate: zod_1.z.string().trim().optional().nullable(),
     notes: zod_1.z.string().trim().optional().nullable()
 });
 exports.recordPaymentSchema = zod_1.z.object({
     amount: zod_1.z.coerce.number().positive('Payment amount must be greater than zero'),
     paymentMethod: zod_1.z.enum(['CASH', 'BANK_TRANSFER', 'CHEQUE']).default('CASH'),
+    paymentDate: zod_1.z.string().trim().optional().nullable(),
     installmentId: zod_1.z.string().optional().nullable(),
     referenceNumber: zod_1.z.string().trim().optional().nullable(),
     notes: zod_1.z.string().trim().optional().nullable()

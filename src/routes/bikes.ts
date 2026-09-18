@@ -276,6 +276,7 @@ router.post('/', requirePermission('MANAGE_BIKES'), validateBody(createBikeSchem
 
     const result = await prisma.$transaction(async (tx) => {
       // Create Bike
+      const bikeCreatedDate = data.receivedDate ? new Date(data.receivedDate) : undefined;
       const bike = await tx.bike.create({
         data: {
           type: data.type,
@@ -291,6 +292,7 @@ router.post('/', requirePermission('MANAGE_BIKES'), validateBody(createBikeSchem
           status: data.status || 'IN_STOCK',
           marketTarget: data.marketTarget || 'BOTH',
           notes: data.notes?.trim() || null,
+          createdAt: bikeCreatedDate,
           isDeleted: false
         }
       });

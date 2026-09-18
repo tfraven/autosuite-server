@@ -329,7 +329,7 @@ router.get('/:id', (0, auth_js_1.requirePermission)('READ_SALES'), async (req, r
 // POST /api/sales - Create a sale transaction (Normalized 3NF/BCNF Customer linkage)
 router.post('/', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0, validate_js_1.validateBody)(schemas_js_1.createSaleSchema), async (req, res) => {
     try {
-        const { bikeId, saleType, customerId, customerName, customerPhone, customerCnic, customerAddress, customerType, salePrice, discount = 0, tax = 0, paymentType, initialDeposit = 0, paymentReference, installmentsCount = 0, installmentIntervalMonths = 1, firstInstallmentDueDate, notes } = req.body;
+        const { bikeId, saleType, customerId, customerName, customerPhone, customerCnic, customerAddress, customerType, salePrice, discount = 0, tax = 0, paymentType, initialDeposit = 0, paymentReference, installmentsCount = 0, installmentIntervalMonths = 1, firstInstallmentDueDate, saleDate, notes } = req.body;
         // Verify bike is in stock
         const bike = await prisma_js_1.prisma.bike.findUnique({ where: { id: bikeId } });
         if (!bike || bike.isDeleted) {
@@ -348,6 +348,7 @@ router.post('/', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0, validate_j
         const remainingBalance = Math.max(0, finalAmount - depositNum);
         const invoiceNumber = await generateInvoiceNumber();
         const userId = req.user.userId;
+        const effectiveSaleDate = saleDate ? new Date(saleDate) : new Date();
         let isNewCustomerCreated = false;
         const result = await prisma_js_1.prisma.$transaction(async (tx) => {
             // 1. Resolve or Create normalized Customer record (3NF/BCNF)
@@ -439,6 +440,8 @@ router.post('/', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0, validate_j
             const sale = await tx.sale.create({
                 data: {
                     invoiceNumber,
+                    saleDate: effectiveSaleDate,
+                    createdAt: effectiveSaleDate,
                     saleType: saleType || 'B2C',
                     bikeId,
                     customerId: resolvedCustomerId || null,
@@ -467,7 +470,8 @@ router.post('/', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0, validate_j
                         amount: depositNum,
                         paymentMethod: paymentType === 'CREDIT_INSTALLMENT' ? 'CASH' : paymentType,
                         referenceNumber: paymentReference || null,
-                        notes: paymentType === 'CREDIT_INSTALLMENT' ? 'Down Payment / Initial Deposit' : 'Full / Upfront Payment'
+                        notes: paymentType === 'CREDIT_INSTALLMENT' ? 'Down Payment / Initial Deposit' : 'Full / Upfront Payment',
+                        paymentDate: effectiveSaleDate
                     }
                 });
             }
@@ -556,8 +560,9 @@ router.post('/', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0, validate_j
 router.post('/:id/payments', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0, validate_js_1.validateBody)(schemas_js_1.recordPaymentSchema), async (req, res) => {
     try {
         const { id } = req.params;
-        const { amount, paymentMethod, referenceNumber, installmentId, notes } = req.body;
+        const { amount, paymentMethod, referenceNumber, installmentId, paymentDate, notes } = req.body;
         const payAmount = Number(amount);
+        const effectivePaymentDate = paymentDate ? new Date(paymentDate) : new Date();
         const sale = await prisma_js_1.prisma.sale.findUnique({
             where: { id },
             include: { installments: true }
@@ -575,7 +580,8 @@ router.post('/:id/payments', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0
                     amount: payAmount,
                     paymentMethod: paymentMethod || 'CASH',
                     referenceNumber: referenceNumber || null,
-                    notes: notes || null
+                    notes: notes || null,
+                    paymentDate: effectivePaymentDate
                 }
             });
             // 2. If installment selected, update status
@@ -589,7 +595,7 @@ router.post('/:id/payments', (0, auth_js_1.requirePermission)('CREATE_SALE'), (0
                         data: {
                             paidAmount: newPaid,
                             status: isFullyPaid ? 'PAID' : 'PENDING',
-                            paidDate: isFullyPaid ? new Date() : inst.paidDate
+                            paidDate: isFullyPaid ? effectivePaymentDate : inst.paidDate
                         }
                     });
                 }
