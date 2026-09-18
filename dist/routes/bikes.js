@@ -145,10 +145,11 @@ router.get('/', async (req, res) => {
 router.get('/search-chassis/:chassis', async (req, res) => {
     try {
         const { chassis } = req.params;
-        const bike = await prisma_js_1.prisma.bike.findFirst({
+        const cleanChassis = chassis.trim();
+        let bike = await prisma_js_1.prisma.bike.findFirst({
             where: {
                 chassisNumber: {
-                    contains: chassis,
+                    equals: cleanChassis,
                     mode: 'insensitive'
                 },
                 status: 'IN_STOCK',
@@ -159,6 +160,22 @@ router.get('/search-chassis/:chassis', async (req, res) => {
                 usedDetail: true
             }
         });
+        if (!bike) {
+            bike = await prisma_js_1.prisma.bike.findFirst({
+                where: {
+                    chassisNumber: {
+                        contains: cleanChassis,
+                        mode: 'insensitive'
+                    },
+                    status: 'IN_STOCK',
+                    isDeleted: false
+                },
+                include: {
+                    model: true,
+                    usedDetail: true
+                }
+            });
+        }
         if (!bike) {
             res.status(404).json({ error: 'No available in-stock motorcycle found with this chassis number' });
             return;

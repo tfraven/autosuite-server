@@ -400,38 +400,90 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
     const invoiceNumber = await generateInvoiceNumber();
     const userId = req.user!.userId;
 
+    let isNewCustomerCreated = false;
+
     const result = await prisma.$transaction(async (tx) => {
       // 1. Resolve or Create normalized Customer record (3NF/BCNF)
       let resolvedCustomerId = customerId;
+      const cleanPhone = customerPhone?.trim() || '';
+      const cleanCnic = customerCnic?.trim() || null;
+      const cleanAddress = customerAddress?.trim() || null;
+      const cleanName = customerName?.trim() || '';
 
-      if (!resolvedCustomerId && customerPhone) {
-        const cleanPhone = customerPhone.trim();
-        const existingCust = await tx.customer.findUnique({
-          where: { phone: cleanPhone }
+      if (resolvedCustomerId) {
+        // Customer ID explicitly supplied (e.g. from autocomplete)
+        const existingById = await tx.customer.findUnique({
+          where: { id: resolvedCustomerId }
         });
 
-        if (existingCust) {
-          resolvedCustomerId = existingCust.id;
-          if (customerCnic || customerAddress) {
+        if (existingById) {
+          const updateData: any = {};
+          if (cleanAddress && cleanAddress !== existingById.address) {
+            updateData.address = cleanAddress;
+          }
+          if (cleanCnic && !existingById.cnic) {
+            updateData.cnic = cleanCnic;
+          }
+          if (existingById.isDeleted) {
+            updateData.isDeleted = false;
+            updateData.deletedAt = null;
+          }
+          if (Object.keys(updateData).length > 0) {
             await tx.customer.update({
-              where: { id: existingCust.id },
-              data: {
-                ...(customerCnic ? { cnic: customerCnic.trim() } : {}),
-                ...(customerAddress ? { address: customerAddress.trim() } : {})
-              }
+              where: { id: existingById.id },
+              data: updateData
             });
           }
         } else {
+          resolvedCustomerId = null;
+        }
+      }
+
+      if (!resolvedCustomerId && cleanPhone) {
+        // Find existing customer by unique phone
+        let existingCust = await tx.customer.findUnique({
+          where: { phone: cleanPhone }
+        });
+
+        // If not found by phone, check by unique CNIC if available
+        if (!existingCust && cleanCnic) {
+          existingCust = await tx.customer.findUnique({
+            where: { cnic: cleanCnic }
+          });
+        }
+
+        if (existingCust) {
+          resolvedCustomerId = existingCust.id;
+          const updateData: any = {};
+          if (cleanAddress && cleanAddress !== existingCust.address) {
+            updateData.address = cleanAddress;
+          }
+          if (cleanCnic && !existingCust.cnic) {
+            updateData.cnic = cleanCnic;
+          }
+          if (existingCust.isDeleted) {
+            updateData.isDeleted = false;
+            updateData.deletedAt = null;
+          }
+          if (Object.keys(updateData).length > 0) {
+            await tx.customer.update({
+              where: { id: existingCust.id },
+              data: updateData
+            });
+          }
+        } else {
+          // Create new Customer record
           const newCust = await tx.customer.create({
             data: {
-              name: customerName.trim(),
+              name: cleanName,
               phone: cleanPhone,
-              cnic: customerCnic?.trim() || null,
-              address: customerAddress?.trim() || null,
+              cnic: cleanCnic,
+              address: cleanAddress,
               customerType: customerType || (saleType === 'B2B' ? 'DEALER' : 'RETAIL')
             }
           });
           resolvedCustomerId = newCust.id;
+          isNewCustomerCreated = true;
         }
       }
 
@@ -542,6 +594,16 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
       req.ip
     );
 
+    if (isNewCustomerCreated && result.customerId) {
+      await logAuditEvent(
+        userId,
+        'CREATE_CUSTOMER',
+        'CUSTOMERS',
+        `Created customer ${customerName.trim()} (${customerPhone.trim()}) via Sale ${result.invoiceNumber}`,
+        req.ip
+      );
+    }
+
     const fullSale = await prisma.sale.findUnique({
       where: { id: result.id },
       include: {
@@ -562,7 +624,15 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
     res.status(201).json(fullSale);
   } catch (err: any) {
     console.error('Error creating sale:', err);
-    res.status(500).json({ error: 'Failed to record sale transaction' });
+    if (err.code === 'P2002') {
+      const target = err.meta?.target || [];
+      const fieldName = Array.isArray(target) ? target.join(', ') : 'phone or CNIC';
+      res.status(409).json({
+        error: `A customer record with this ${fieldName} already exists in the system.`
+      });
+      return;
+    }
+    res.status(500).json({ error: err.message || 'Failed to record sale transaction' });
   }
 });
 
