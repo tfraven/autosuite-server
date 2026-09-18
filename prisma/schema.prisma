@@ -3,10 +3,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
+
+// ================= USER & RBAC (3NF/BCNF) =================
 
 model User {
   id           String      @id @default(uuid())
@@ -53,66 +55,152 @@ model RolePermission {
   @@id([roleId, permissionId])
 }
 
+// ================= CUSTOMER ENTITY (3NF/BCNF) =================
+// Eliminates transitive functional dependencies from Sale and PartOrder
+
+model Customer {
+  id           String      @id @default(uuid())
+  name         String
+  phone        String      @unique
+  cnic         String?     @unique
+  address      String?
+  customerType String      @default("RETAIL") // RETAIL, DEALER, WORKSHOP, MECHANIC
+  notes        String?
+  isDeleted    Boolean     @default(false)
+  deletedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  sales        Sale[]
+  partOrders   PartOrder[]
+
+  @@index([name])
+  @@index([phone])
+}
+
+// ================= VENDOR ENTITY (3NF/BCNF) =================
+// Eliminates transitive functional dependencies from VendorPO
+
+model Vendor {
+  id             String     @id @default(uuid())
+  name           String     @unique
+  contactNumber  String?
+  email          String?
+  address        String?
+  notes          String?
+  isDeleted      Boolean    @default(false)
+  deletedAt      DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  purchaseOrders VendorPO[]
+
+  @@index([name])
+}
+
+// ================= BIKE CATALOG & INVENTORY (3NF/BCNF) =================
+// BikeModel normalizes model definitions (Brand can be Honda, Unique, Superstar, Suzuki, Yamaha, etc.)
+// UsedBikeDetail normalizes pre-owned subtype attributes eliminating sparse NULLs and 3NF anomalies
+
+model BikeModel {
+  id                 String   @id @default(uuid())
+  name               String   @unique
+  brand              String   @default("Atlas Honda") // Honda, Unique, Superstar, Suzuki, Yamaha, United, Road Prince, etc.
+  engineDisplacement String?  // e.g. 70cc, 100cc, 110cc, 125cc, 150cc
+  defaultRetailPrice Float    @default(0)
+  isDeleted          Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  bikes              Bike[]
+
+  @@index([brand])
+}
+
 model Bike {
-  id                 String               @id @default(uuid())
-  type               String               @default("BRAND_NEW") // BRAND_NEW, USED
-  modelName          String
-  engineNumber       String               @unique
-  chassisNumber      String               @unique
+  id                 String          @id @default(uuid())
+  type               String          @default("BRAND_NEW") // BRAND_NEW, USED
+  modelId            String?
+  model              BikeModel?      @relation(fields: [modelId], references: [id])
+  modelName          String          // Preserved for fast queries and backward compatibility
+  engineNumber       String          @unique
+  chassisNumber      String          @unique
   color              String
   modelYear          Int
   batchNumber        String?
-  dealerInvoicePrice Float                @default(0)
-  retailPrice        Float                @default(0)
-  status             String               @default("IN_STOCK") // IN_STOCK, RESERVED, SOLD, PENDING_DELIVERY
-  marketTarget       String               @default("BOTH") // B2B, B2C, BOTH
+  dealerInvoicePrice Float           @default(0)
+  retailPrice        Float           @default(0)
+  status             String          @default("IN_STOCK") // IN_STOCK, RESERVED, SOLD, PENDING_DELIVERY
+  marketTarget       String          @default("BOTH") // B2B, B2C, BOTH
+  notes              String?
+  isDeleted          Boolean         @default(false)
+  deletedAt          DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
 
-  // Used Bike specific attributes
+  // 1-to-1 Subtype relation for Used Pre-owned details (3NF/BCNF)
+  usedDetail         UsedBikeDetail?
+  sales              Sale[]
+
+  @@index([status])
+  @@index([type])
+  @@index([modelName])
+}
+
+model UsedBikeDetail {
+  id                   String    @id @default(uuid())
+  bikeId               String    @unique
+  bike                 Bike      @relation(fields: [bikeId], references: [id], onDelete: Cascade)
   registrationNumber   String?
+  conditionGrade       String?   // GRADE_A, GRADE_B, GRADE_C
+  purchaseCost         Float     @default(0)
+  refurbishmentCost    Float     @default(0)
+  expectedSellingPrice Float     @default(0)
   prevOwnerName        String?
   prevOwnerPhone       String?
   prevOwnerCnic        String?
-  conditionGrade       String?            // GRADE_A, GRADE_B, GRADE_C
-  purchaseCost         Float?             @default(0)
-  refurbishmentCost    Float?             @default(0)
-  expectedSellingPrice Float?             @default(0)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
-  notes              String?
-  isDeleted          Boolean              @default(false)
-  deletedAt          DateTime?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  sales              Sale[]
+  @@index([registrationNumber])
 }
 
+// ================= SALES & BILLING (3NF/BCNF) =================
+
 model Sale {
-  id                 String                @id @default(uuid())
-  invoiceNumber      String                @unique
-  saleType           String                @default("B2C") // B2C, B2B
-  bikeId             String
-  bike               Bike                  @relation(fields: [bikeId], references: [id])
-  customerName       String
-  customerPhone      String
-  customerCnic       String?
-  customerAddress    String?
-  customerType       String                @default("RETAIL") // RETAIL, DEALER, WORKSHOP
-  salePrice          Float
-  discount           Float                 @default(0)
-  tax                Float                 @default(0)
-  finalAmount        Float
-  paymentType        String                @default("CASH") // CASH, BANK_TRANSFER, CHEQUE, CREDIT_INSTALLMENT
-  initialDeposit     Float                 @default(0)
-  remainingBalance   Float                 @default(0)
-  status             String                @default("COMPLETED") // COMPLETED, PENDING_PAYMENT, CANCELLED
-  isDeleted          Boolean               @default(false)
-  deletedAt          DateTime?
-  saleDate           DateTime              @default(now())
-  createdAt          DateTime              @default(now())
-  createdById        String
-  createdBy          User                  @relation(fields: [createdById], references: [id])
-  installments       InstallmentSchedule[]
-  payments           PaymentTransaction[]
-  documents          MotorcycleDocument[]
+  id               String                @id @default(uuid())
+  invoiceNumber    String                @unique
+  saleType         String                @default("B2C") // B2C, B2B
+  bikeId           String
+  bike             Bike                  @relation(fields: [bikeId], references: [id])
+  customerId       String?
+  customer         Customer?             @relation(fields: [customerId], references: [id])
+  
+  // Historical snapshot fields for audit integrity and seamless backwards compatibility
+  customerName     String
+  customerPhone    String
+  customerCnic     String?
+  customerAddress  String?
+  customerType     String                @default("RETAIL") // RETAIL, DEALER, WORKSHOP
+  
+  salePrice        Float
+  discount         Float                 @default(0)
+  tax              Float                 @default(0)
+  finalAmount      Float
+  paymentType      String                @default("CASH") // CASH, BANK_TRANSFER, CHEQUE, CREDIT_INSTALLMENT
+  initialDeposit   Float                 @default(0)
+  remainingBalance Float                 @default(0)
+  status           String                @default("COMPLETED") // COMPLETED, PENDING_PAYMENT, CANCELLED
+  isDeleted        Boolean               @default(false)
+  deletedAt        DateTime?
+  saleDate         DateTime              @default(now())
+  createdAt        DateTime              @default(now())
+  createdById      String
+  createdBy        User                  @relation(fields: [createdById], references: [id])
+  installments     InstallmentSchedule[]
+  payments         PaymentTransaction[]
+  documents        MotorcycleDocument[]
+
+  @@index([saleDate])
+  @@index([status])
+  @@index([customerId])
 }
 
 model InstallmentSchedule {
@@ -127,64 +215,95 @@ model InstallmentSchedule {
   paidDate          DateTime?
   notes             String?
   payments          PaymentTransaction[]
+
+  @@index([saleId])
+  @@index([status])
+  @@index([dueDate])
 }
 
 model PaymentTransaction {
-  id            String               @id @default(uuid())
-  saleId        String
-  sale          Sale                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  installmentId String?
-  installment   InstallmentSchedule? @relation(fields: [installmentId], references: [id])
-  amount        Float
-  paymentMethod String               @default("CASH") // CASH, BANK_TRANSFER, CHEQUE
+  id              String               @id @default(uuid())
+  saleId          String
+  sale            Sale                 @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  installmentId   String?
+  installment     InstallmentSchedule? @relation(fields: [installmentId], references: [id])
+  amount          Float
+  paymentMethod   String               @default("CASH") // CASH, BANK_TRANSFER, CHEQUE
   referenceNumber String?
-  paymentDate   DateTime             @default(now())
-  notes         String?
+  paymentDate     DateTime             @default(now())
+  notes           String?
+
+  @@index([saleId])
+  @@index([installmentId])
 }
 
 model MotorcycleDocument {
-  id               String   @id @default(uuid())
-  saleId           String
-  sale             Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  docType          String   // SALES_CERTIFICATE, DELIVERY_LETTER_GATE_PASS, BOOK_TRANSFER_REQUEST, ALLOTMENT_LETTER, REGISTRATION_APPLICATION
-  paperworkStatus  String   @default("PENDING_MANUFACTURER") // PENDING_MANUFACTURER, PROCESSING_EXCISE, READY_FOR_PICKUP, DELIVERED
-  statusNotes      String?
-  issuedAt         DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id              String   @id @default(uuid())
+  saleId          String
+  sale            Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  docType         String   // SALES_CERTIFICATE, DELIVERY_LETTER_GATE_PASS, BOOK_TRANSFER_REQUEST, ALLOTMENT_LETTER, REGISTRATION_APPLICATION
+  paperworkStatus String   @default("PENDING_MANUFACTURER") // PENDING_MANUFACTURER, PROCESSING_EXCISE, READY_FOR_PICKUP, DELIVERED
+  statusNotes     String?
+  issuedAt        DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([saleId])
+  @@index([paperworkStatus])
+}
+
+// ================= SPARE PARTS & B2B (3NF/BCNF) =================
+
+model PartCategory {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  isDeleted   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  parts       Part[]
 }
 
 model Part {
-  id                 String              @id @default(uuid())
-  partCode           String              @unique
+  id                 String          @id @default(uuid())
+  partCode           String          @unique
   partName           String
   compatibilityModel String
   wholesaleCost      Float
   b2bSellingPrice    Float
-  quantity           Int                 @default(0)
-  reorderThreshold   Int                 @default(5)
-  category           String?
+  quantity           Int             @default(0)
+  reorderThreshold   Int             @default(5)
+  categoryId         String?
+  categoryRef        PartCategory?   @relation(fields: [categoryId], references: [id])
+  category           String?         // Preserved for backwards compatibility
   location           String?
-  isDeleted          Boolean             @default(false)
+  isDeleted          Boolean         @default(false)
   deletedAt          DateTime?
-  createdAt          DateTime            @default(now())
-  updatedAt          DateTime            @updatedAt
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
   orderItems         PartOrderItem[]
   poItems            VendorPOItem[]
+
+  @@index([partCode])
+  @@index([category])
 }
 
 model PartOrder {
-  id             String          @id @default(uuid())
-  orderNumber    String          @unique
-  customerName   String
-  customerType   String          @default("SECONDARY_WORKSHOP") // SECONDARY_WORKSHOP, MECHANIC, PARTNER_DEALER
-  contactNumber  String
-  totalAmount    Float
-  status         String          @default("COMPLETED") // PENDING, COMPLETED, CANCELLED
-  notes          String?
-  isDeleted      Boolean         @default(false)
-  deletedAt      DateTime?
-  createdAt      DateTime        @default(now())
-  items          PartOrderItem[]
+  id            String          @id @default(uuid())
+  orderNumber   String          @unique
+  customerId    String?
+  customer      Customer?       @relation(fields: [customerId], references: [id])
+  customerName  String
+  customerType  String          @default("SECONDARY_WORKSHOP") // SECONDARY_WORKSHOP, MECHANIC, PARTNER_DEALER
+  contactNumber String
+  totalAmount   Float
+  status        String          @default("COMPLETED") // PENDING, COMPLETED, CANCELLED
+  notes         String?
+  isDeleted     Boolean         @default(false)
+  deletedAt     DateTime?
+  createdAt     DateTime        @default(now())
+  items         PartOrderItem[]
+
+  @@index([customerId])
 }
 
 model PartOrderItem {
@@ -199,19 +318,23 @@ model PartOrderItem {
 }
 
 model VendorPO {
-  id             String         @id @default(uuid())
-  poNumber       String         @unique
-  vendorName     String
-  contactNumber  String?
-  status         String         @default("DRAFT") // DRAFT, ORDERED, RECEIVED, CANCELLED
-  totalAmount    Float          @default(0)
-  notes          String?
-  orderedAt      DateTime?
-  receivedAt     DateTime?
-  isDeleted      Boolean        @default(false)
-  deletedAt      DateTime?
-  createdAt      DateTime       @default(now())
-  items          VendorPOItem[]
+  id            String         @id @default(uuid())
+  poNumber      String         @unique
+  vendorId      String?
+  vendor        Vendor?        @relation(fields: [vendorId], references: [id])
+  vendorName    String
+  contactNumber String?
+  status        String         @default("DRAFT") // DRAFT, ORDERED, RECEIVED, CANCELLED
+  totalAmount   Float          @default(0)
+  notes         String?
+  orderedAt     DateTime?
+  receivedAt    DateTime?
+  isDeleted     Boolean        @default(false)
+  deletedAt     DateTime?
+  createdAt     DateTime       @default(now())
+  items         VendorPOItem[]
+
+  @@index([vendorId])
 }
 
 model VendorPOItem {
@@ -226,6 +349,8 @@ model VendorPOItem {
   subtotal         Float
 }
 
+// ================= PLATFORM & AUDIT =================
+
 model AuditLog {
   id        String   @id @default(uuid())
   userId    String?
@@ -235,6 +360,9 @@ model AuditLog {
   details   String?
   ipAddress String?
   createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([module])
 }
 
 model PlatformSetting {

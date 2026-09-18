@@ -16,10 +16,45 @@ export const profileUpdateSchema = z.object({
   email: z.string().email('Invalid email address').trim().optional()
 });
 
-// ================= BIKE SCHEMAS =================
+// ================= CUSTOMER SCHEMAS (3NF/BCNF) =================
+export const createCustomerSchema = z.object({
+  name: z.string().min(1, 'Customer name is required').trim(),
+  phone: z.string().min(1, 'Phone number is required').trim(),
+  cnic: z.string().trim().optional().nullable(),
+  address: z.string().trim().optional().nullable(),
+  customerType: z.enum(['RETAIL', 'DEALER', 'WORKSHOP', 'MECHANIC']).default('RETAIL'),
+  notes: z.string().trim().optional().nullable()
+});
+
+export const updateCustomerSchema = createCustomerSchema.partial();
+
+// ================= VENDOR SCHEMAS (3NF/BCNF) =================
+export const createVendorSchema = z.object({
+  name: z.string().min(1, 'Vendor name is required').trim(),
+  contactNumber: z.string().trim().optional().nullable(),
+  email: z.string().email('Invalid email address').trim().optional().nullable(),
+  address: z.string().trim().optional().nullable(),
+  notes: z.string().trim().optional().nullable()
+});
+
+export const updateVendorSchema = createVendorSchema.partial();
+
+// ================= BIKE MODEL SCHEMAS (3NF/BCNF) =================
+export const createBikeModelSchema = z.object({
+  name: z.string().min(1, 'Model name is required').trim(),
+  brand: z.string().min(1, 'Brand is required').trim().default('Atlas Honda'), // Can be Honda, Unique, Superstar, Suzuki, Yamaha, etc.
+  engineDisplacement: z.string().trim().optional().nullable(),
+  defaultRetailPrice: z.coerce.number().min(0).default(0)
+});
+
+export const updateBikeModelSchema = createBikeModelSchema.partial();
+
+// ================= BIKE SCHEMAS (3NF/BCNF) =================
 export const createBikeSchema = z.object({
   type: z.enum(['BRAND_NEW', 'USED']).default('BRAND_NEW'),
+  modelId: z.string().optional().nullable(),
   modelName: z.string().min(1, 'Model name is required').trim(),
+  brand: z.string().trim().optional(), // Can be Honda, Unique, Superstar, Suzuki, Yamaha, or any custom brand
   engineNumber: z.string().min(1, 'Engine number is required').trim(),
   chassisNumber: z.string().min(1, 'Chassis number is required').trim(),
   color: z.string().min(1, 'Color is required').trim(),
@@ -30,7 +65,7 @@ export const createBikeSchema = z.object({
   status: z.enum(['IN_STOCK', 'RESERVED', 'SOLD', 'PENDING_DELIVERY']).default('IN_STOCK'),
   marketTarget: z.enum(['B2B', 'B2C', 'BOTH']).default('BOTH'),
 
-  // Used bike fields
+  // Used bike pre-owned fields (normalized into UsedBikeDetail in 3NF)
   registrationNumber: z.string().trim().optional().nullable(),
   prevOwnerName: z.string().trim().optional().nullable(),
   prevOwnerPhone: z.string().trim().optional().nullable(),
@@ -44,15 +79,19 @@ export const createBikeSchema = z.object({
 
 export const updateBikeSchema = createBikeSchema.partial();
 
-// ================= SALE SCHEMAS =================
+// ================= SALE SCHEMAS (3NF/BCNF) =================
 export const createSaleSchema = z.object({
   bikeId: z.string().min(1, 'Motorcycle selection is required'),
   saleType: z.enum(['B2C', 'B2B']).default('B2C'),
+  
+  // Normalized customer reference OR inline customer data (auto-linked or created)
+  customerId: z.string().optional().nullable(),
   customerName: z.string().min(1, 'Customer name is required').trim(),
   customerPhone: z.string().min(1, 'Customer phone number is required').trim(),
   customerCnic: z.string().trim().optional().nullable(),
   customerAddress: z.string().trim().optional().nullable(),
-  customerType: z.enum(['RETAIL', 'DEALER', 'WORKSHOP']).default('RETAIL'),
+  customerType: z.enum(['RETAIL', 'DEALER', 'WORKSHOP', 'MECHANIC']).default('RETAIL'),
+  
   salePrice: z.coerce.number().positive('Sale price must be greater than zero'),
   discount: z.coerce.number().min(0).default(0),
   tax: z.coerce.number().min(0).default(0),
@@ -73,7 +112,7 @@ export const recordPaymentSchema = z.object({
   notes: z.string().trim().optional().nullable()
 });
 
-// ================= PARTS SCHEMAS =================
+// ================= PARTS & INVENTORY SCHEMAS =================
 export const createPartSchema = z.object({
   partCode: z.string().min(1, 'Part code is required').trim().toUpperCase(),
   partName: z.string().min(1, 'Part name is required').trim(),
@@ -82,6 +121,7 @@ export const createPartSchema = z.object({
   b2bSellingPrice: z.coerce.number().min(0, 'Selling price must be non-negative'),
   quantity: z.coerce.number().int().min(0, 'Quantity cannot be negative').default(0),
   reorderThreshold: z.coerce.number().int().min(0).default(5),
+  categoryId: z.string().optional().nullable(),
   category: z.string().trim().optional().nullable(),
   location: z.string().trim().optional().nullable()
 });
@@ -89,9 +129,10 @@ export const createPartSchema = z.object({
 export const updatePartSchema = createPartSchema.partial();
 
 export const createPartOrderSchema = z.object({
+  customerId: z.string().optional().nullable(),
   customerName: z.string().min(1, 'Customer name is required').trim(),
   contactNumber: z.string().min(1, 'Contact number is required').trim(),
-  customerType: z.enum(['SECONDARY_WORKSHOP', 'MECHANIC', 'PARTNER_DEALER']).default('SECONDARY_WORKSHOP'),
+  customerType: z.enum(['SECONDARY_WORKSHOP', 'MECHANIC', 'PARTNER_DEALER', 'RETAIL', 'DEALER', 'WORKSHOP']).default('SECONDARY_WORKSHOP'),
   notes: z.string().trim().optional().nullable(),
   items: z.array(z.object({
     partId: z.string().min(1, 'Part ID is required'),
@@ -101,6 +142,7 @@ export const createPartOrderSchema = z.object({
 });
 
 export const createVendorPOSchema = z.object({
+  vendorId: z.string().optional().nullable(),
   vendorName: z.string().min(1, 'Vendor name is required').trim(),
   contactNumber: z.string().trim().optional().nullable(),
   notes: z.string().trim().optional().nullable(),
@@ -147,4 +189,3 @@ export const updateSettingsSchema = z.object({
   ntnNumber: z.string().optional(),
   logRetentionDays: z.coerce.number().int().min(1).optional()
 }).passthrough();
-

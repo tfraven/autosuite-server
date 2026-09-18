@@ -161,7 +161,11 @@ router.get('/export/bikes', requirePermission('EXPORT_EXCEL'), async (_req: Auth
   try {
     const bikes = await prisma.bike.findMany({
       where: { isDeleted: false },
-      orderBy: [{ status: 'asc' }, { modelName: 'asc' }]
+      orderBy: [{ status: 'asc' }, { modelName: 'asc' }],
+      include: {
+        model: true,
+        usedDetail: true
+      }
     });
 
     const workbook = new ExcelJS.Workbook();
@@ -171,6 +175,7 @@ router.get('/export/bikes', requirePermission('EXPORT_EXCEL'), async (_req: Auth
     worksheet.columns = [
       { header: 'Type', key: 'type', width: 14 },
       { header: 'Model Name', key: 'modelName', width: 22 },
+      { header: 'Brand', key: 'brand', width: 16 },
       { header: 'Chassis Number', key: 'chassisNumber', width: 22 },
       { header: 'Engine Number', key: 'engineNumber', width: 22 },
       { header: 'Color', key: 'color', width: 14 },
@@ -191,6 +196,7 @@ router.get('/export/bikes', requirePermission('EXPORT_EXCEL'), async (_req: Auth
       worksheet.addRow({
         type: b.type === 'BRAND_NEW' ? 'Brand New' : 'Used Certified',
         modelName: b.modelName,
+        brand: b.model?.brand || 'Atlas Honda',
         chassisNumber: b.chassisNumber,
         engineNumber: b.engineNumber,
         color: b.color,
@@ -199,10 +205,10 @@ router.get('/export/bikes', requirePermission('EXPORT_EXCEL'), async (_req: Auth
         marketTarget: b.marketTarget,
         dealerInvoicePrice: b.dealerInvoicePrice,
         retailPrice: b.retailPrice,
-        registrationNumber: b.registrationNumber || '-',
-        conditionGrade: b.conditionGrade || '-',
-        prevOwnerName: b.prevOwnerName || '-',
-        prevOwnerPhone: b.prevOwnerPhone || '-'
+        registrationNumber: b.usedDetail?.registrationNumber || '-',
+        conditionGrade: b.usedDetail?.conditionGrade || '-',
+        prevOwnerName: b.usedDetail?.prevOwnerName || '-',
+        prevOwnerPhone: b.usedDetail?.prevOwnerPhone || '-'
       });
     });
 
@@ -222,7 +228,8 @@ router.get('/export/parts', requirePermission('EXPORT_EXCEL'), async (_req: Auth
   try {
     const parts = await prisma.part.findMany({
       where: { isDeleted: false },
-      orderBy: { partName: 'asc' }
+      orderBy: { partName: 'asc' },
+      include: { categoryRef: true }
     });
 
     const workbook = new ExcelJS.Workbook();
@@ -248,7 +255,7 @@ router.get('/export/parts', requirePermission('EXPORT_EXCEL'), async (_req: Auth
       worksheet.addRow({
         partCode: p.partCode,
         partName: p.partName,
-        category: p.category || 'General',
+        category: p.categoryRef?.name || p.category || 'General',
         compatibilityModel: p.compatibilityModel,
         quantity: p.quantity,
         reorderThreshold: p.reorderThreshold,

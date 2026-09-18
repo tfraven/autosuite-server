@@ -80,7 +80,7 @@ async function runTests() {
     discount: 5000,
     tax: 0,
     paymentType: 'CREDIT_INSTALLMENT',
-    initialDeposit: 75000,
+    initialDeposit: Math.round(availableBike.retailPrice * 0.2),
     installmentsCount: 6,
     firstInstallmentDueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
   };

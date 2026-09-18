@@ -45,6 +45,8 @@ router.get('/', requirePermission('READ_SALES'), async (req: AuthenticatedReques
         { customerName: { contains: q, mode: 'insensitive' } },
         { customerPhone: { contains: q, mode: 'insensitive' } },
         { customerCnic: { contains: q, mode: 'insensitive' } },
+        { customer: { name: { contains: q, mode: 'insensitive' } } },
+        { customer: { phone: { contains: q, mode: 'insensitive' } } },
         { bike: { chassisNumber: { contains: q, mode: 'insensitive' } } },
         { bike: { engineNumber: { contains: q, mode: 'insensitive' } } },
         { bike: { modelName: { contains: q, mode: 'insensitive' } } }
@@ -57,7 +59,13 @@ router.get('/', requirePermission('READ_SALES'), async (req: AuthenticatedReques
       where,
       orderBy: { saleDate: 'desc' },
       include: {
-        bike: true,
+        customer: true,
+        bike: {
+          include: {
+            model: true,
+            usedDetail: true
+          }
+        },
         createdBy: {
           select: { id: true, name: true, username: true }
         },
@@ -104,7 +112,7 @@ router.get('/', requirePermission('READ_SALES'), async (req: AuthenticatedReques
   }
 });
 
-// GET /api/sales/customer-lookup - Fast customer profile autocomplete for sales entry (Task 10)
+// GET /api/sales/customer-lookup - Fast customer profile autocomplete for sales entry (3NF/BCNF)
 router.get('/customer-lookup', requirePermission('READ_SALES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { query } = req.query;
@@ -115,178 +123,158 @@ router.get('/customer-lookup', requirePermission('READ_SALES'), async (req: Auth
 
     const q = String(query).trim();
 
-    // Fetch recent non-deleted sales matching customer name, phone, or CNIC
-    const matchingSales = await prisma.sale.findMany({
+    // Query normalized Customer table directly
+    const matchingCustomers = await prisma.customer.findMany({
       where: {
         isDeleted: false,
         OR: [
-          { customerPhone: { contains: q, mode: 'insensitive' } },
-          { customerName: { contains: q, mode: 'insensitive' } },
-          { customerCnic: { contains: q, mode: 'insensitive' } }
+          { phone: { contains: q, mode: 'insensitive' } },
+          { name: { contains: q, mode: 'insensitive' } },
+          { cnic: { contains: q, mode: 'insensitive' } }
         ]
       },
-      orderBy: { saleDate: 'desc' },
-      take: 50
+      include: {
+        sales: {
+          where: { isDeleted: false },
+          orderBy: { saleDate: 'desc' },
+          take: 5
+        }
+      },
+      take: 10
     });
 
-    const customerMap = new Map<string, any>();
+    const results = matchingCustomers.map((c) => {
+      const totalPurchases = c.sales.length;
+      const totalSpent = c.sales.reduce((sum, s) => sum + s.finalAmount, 0);
+      const remainingBalance = c.sales.reduce((sum, s) => sum + s.remainingBalance, 0);
+      const lastSale = c.sales[0];
 
-    for (const sale of matchingSales) {
-      const key = (sale.customerPhone || sale.customerName).trim().toLowerCase();
-      if (!customerMap.has(key)) {
-        customerMap.set(key, {
-          name: sale.customerName,
-          phone: sale.customerPhone,
-          cnic: sale.customerCnic || '',
-          address: sale.customerAddress || '',
-          customerType: sale.customerType || 'RETAIL',
-          totalPurchases: 1,
-          totalSpent: sale.finalAmount,
-          remainingBalance: sale.remainingBalance,
-          lastPurchaseDate: sale.saleDate,
-          lastInvoice: sale.invoiceNumber
-        });
-      } else {
-        const c = customerMap.get(key);
-        c.totalPurchases += 1;
-        c.totalSpent += sale.finalAmount;
-        c.remainingBalance += sale.remainingBalance;
-      }
-    }
+      return {
+        id: c.id,
+        name: c.name,
+        phone: c.phone,
+        cnic: c.cnic || '',
+        address: c.address || '',
+        customerType: c.customerType || 'RETAIL',
+        totalPurchases,
+        totalSpent,
+        remainingBalance,
+        lastPurchaseDate: lastSale?.saleDate || c.createdAt,
+        lastInvoice: lastSale?.invoiceNumber || null
+      };
+    });
 
-    res.json(Array.from(customerMap.values()).slice(0, 10));
+    res.json(results);
   } catch (err: any) {
     console.error('Error in customer lookup:', err);
     res.status(500).json({ error: 'Failed to lookup customers' });
   }
 });
 
-// GET /api/sales/customers - Aggregated Customer Records with Ledger & Stats
+// GET /api/sales/customers - Backwards-compatible route for aggregated Customer Records with Ledger & Stats
 router.get('/customers', requirePermission('READ_SALES'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { search, customerType, status, page, limit = '20' } = req.query;
 
-    const sales = await prisma.sale.findMany({
-      where: { isDeleted: false },
-      orderBy: { saleDate: 'desc' },
+    const where: any = { isDeleted: false };
+    if (customerType) {
+      where.customerType = String(customerType);
+    }
+
+    if (search) {
+      const q = String(search).trim();
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { phone: { contains: q, mode: 'insensitive' } },
+        { cnic: { contains: q, mode: 'insensitive' } },
+        { address: { contains: q, mode: 'insensitive' } }
+      ];
+    }
+
+    const customers = await prisma.customer.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
       include: {
-        bike: true,
-        createdBy: {
-          select: { id: true, name: true, username: true }
-        },
-        installments: {
-          orderBy: { installmentNumber: 'asc' }
-        },
-        payments: {
-          orderBy: { paymentDate: 'desc' }
+        sales: {
+          where: { isDeleted: false },
+          include: {
+            bike: true,
+            installments: { orderBy: { installmentNumber: 'asc' } },
+            payments: { orderBy: { paymentDate: 'desc' } }
+          },
+          orderBy: { saleDate: 'desc' }
         }
       }
     });
 
-    const customerMap = new Map<string, any>();
-
-    for (const sale of sales) {
-      const key = (sale.customerPhone || sale.customerName || sale.id).trim().toLowerCase();
-
-      if (!customerMap.has(key)) {
-        customerMap.set(key, {
-          id: key,
-          name: sale.customerName,
-          phone: sale.customerPhone,
-          cnic: sale.customerCnic || '',
-          address: sale.customerAddress || '',
-          customerType: sale.customerType || 'RETAIL',
-          saleType: sale.saleType,
-          totalPurchases: 0,
-          totalSpent: 0,
-          totalPaid: 0,
-          remainingBalance: 0,
-          hasOverdue: false,
-          firstPurchaseDate: sale.saleDate,
-          lastPurchaseDate: sale.saleDate,
-          purchasedBikes: [],
-          sales: []
-        });
-      }
-
-      const cust = customerMap.get(key);
-      cust.totalPurchases += 1;
-      cust.totalSpent += Number(sale.finalAmount || 0);
-      cust.remainingBalance += Number(sale.remainingBalance || 0);
-      cust.totalPaid += Number((sale.finalAmount || 0) - (sale.remainingBalance || 0));
-
-      if (new Date(sale.saleDate) > new Date(cust.lastPurchaseDate)) {
-        cust.lastPurchaseDate = sale.saleDate;
-      }
-      if (new Date(sale.saleDate) < new Date(cust.firstPurchaseDate)) {
-        cust.firstPurchaseDate = sale.saleDate;
-      }
-
-      const now = new Date();
-      if (sale.installments?.some((i) => i.status !== 'PAID' && new Date(i.dueDate) < now)) {
-        cust.hasOverdue = true;
-      }
-
-      if (sale.bike) {
-        cust.purchasedBikes.push({
-          id: sale.bike.id,
-          modelName: sale.bike.modelName,
-          chassisNumber: sale.bike.chassisNumber,
-          engineNumber: sale.bike.engineNumber,
-          color: sale.bike.color,
-          modelYear: sale.bike.modelYear,
-          saleDate: sale.saleDate,
-          invoiceNumber: sale.invoiceNumber
-        });
-      }
-
-      cust.sales.push({
-        id: sale.id,
-        invoiceNumber: sale.invoiceNumber,
-        saleDate: sale.saleDate,
-        saleType: sale.saleType,
-        paymentType: sale.paymentType,
-        finalAmount: sale.finalAmount,
-        remainingBalance: sale.remainingBalance,
-        status: sale.status,
-        bike: sale.bike,
-        installments: sale.installments,
-        payments: sale.payments
-      });
-    }
-
-    let customers = Array.from(customerMap.values());
-
-    if (search) {
-      const q = String(search).toLowerCase().trim();
-      customers = customers.filter(
-        (c) =>
-          c.name.toLowerCase().includes(q) ||
-          c.phone.toLowerCase().includes(q) ||
-          c.cnic.toLowerCase().includes(q) ||
-          c.purchasedBikes.some((b: any) =>
-            b.chassisNumber.toLowerCase().includes(q) || b.modelName.toLowerCase().includes(q)
-          )
+    const now = new Date();
+    let formatted = customers.map((c) => {
+      const totalPurchases = c.sales.length;
+      const totalSpent = c.sales.reduce((sum, s) => sum + s.finalAmount, 0);
+      const remainingBalance = c.sales.reduce((sum, s) => sum + s.remainingBalance, 0);
+      const totalPaid = Math.max(0, totalSpent - remainingBalance);
+      const hasOverdue = c.sales.some((s) =>
+        s.installments?.some((i) => i.status !== 'PAID' && new Date(i.dueDate) < now)
       );
-    }
 
-    if (customerType) {
-      customers = customers.filter((c) => c.customerType === String(customerType));
-    }
+      const firstPurchaseDate = c.sales.length > 0 ? c.sales[c.sales.length - 1].saleDate : c.createdAt;
+      const lastPurchaseDate = c.sales.length > 0 ? c.sales[0].saleDate : c.createdAt;
+
+      const purchasedBikes = c.sales
+        .filter((s) => s.bike)
+        .map((s) => ({
+          id: s.bike.id,
+          modelName: s.bike.modelName,
+          chassisNumber: s.bike.chassisNumber,
+          engineNumber: s.bike.engineNumber,
+          color: s.bike.color,
+          modelYear: s.bike.modelYear,
+          saleDate: s.saleDate,
+          invoiceNumber: s.invoiceNumber
+        }));
+
+      const salesList = c.sales.map((s) => ({
+        id: s.id,
+        invoiceNumber: s.invoiceNumber,
+        saleDate: s.saleDate,
+        saleType: s.saleType,
+        paymentType: s.paymentType,
+        finalAmount: s.finalAmount,
+        remainingBalance: s.remainingBalance,
+        status: s.status
+      }));
+
+      return {
+        id: c.id,
+        name: c.name,
+        phone: c.phone,
+        cnic: c.cnic || '',
+        address: c.address || '',
+        customerType: c.customerType,
+        saleType: c.sales[0]?.saleType || (c.customerType === 'DEALER' ? 'B2B' : 'B2C'),
+        totalPurchases,
+        totalSpent,
+        totalPaid,
+        remainingBalance,
+        hasOverdue,
+        firstPurchaseDate,
+        lastPurchaseDate,
+        purchasedBikes,
+        sales: salesList
+      };
+    });
 
     if (status === 'DUES') {
-      customers = customers.filter((c) => c.remainingBalance > 0);
+      formatted = formatted.filter((c) => c.remainingBalance > 0);
     } else if (status === 'SETTLED') {
-      customers = customers.filter((c) => c.remainingBalance <= 0);
+      formatted = formatted.filter((c) => c.remainingBalance <= 0);
     }
 
-    customers.sort((a, b) => new Date(b.lastPurchaseDate).getTime() - new Date(a.lastPurchaseDate).getTime());
-
-    const totalCustomers = customers.length;
-    const totalRevenue = customers.reduce((acc, c) => acc + c.totalSpent, 0);
-    const totalOutstanding = customers.reduce((acc, c) => acc + c.remainingBalance, 0);
-    const debtorsCount = customers.filter((c) => c.remainingBalance > 0).length;
-    const dealerCount = customers.filter((c) => c.customerType === 'DEALER' || c.saleType === 'B2B').length;
+    const totalCustomers = formatted.length;
+    const totalRevenue = formatted.reduce((acc, c) => acc + c.totalSpent, 0);
+    const totalOutstanding = formatted.reduce((acc, c) => acc + c.remainingBalance, 0);
+    const debtorsCount = formatted.filter((c) => c.remainingBalance > 0).length;
+    const dealerCount = formatted.filter((c) => c.customerType === 'DEALER' || c.saleType === 'B2B').length;
 
     const summary = {
       totalCustomers,
@@ -299,7 +287,7 @@ router.get('/customers', requirePermission('READ_SALES'), async (req: Authentica
     if (page) {
       const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
       const limitNum = Math.max(1, parseInt(String(limit), 10) || 20);
-      const paginatedCustomers = customers.slice((pageNum - 1) * limitNum, pageNum * limitNum);
+      const paginatedCustomers = formatted.slice((pageNum - 1) * limitNum, pageNum * limitNum);
       const totalPages = Math.ceil(totalCustomers / limitNum);
 
       res.json({
@@ -319,7 +307,7 @@ router.get('/customers', requirePermission('READ_SALES'), async (req: Authentica
     }
 
     res.json({
-      customers,
+      customers: formatted,
       summary
     });
   } catch (err: any) {
@@ -335,7 +323,13 @@ router.get('/:id', requirePermission('READ_SALES'), async (req: AuthenticatedReq
     const sale = await prisma.sale.findUnique({
       where: { id },
       include: {
-        bike: true,
+        customer: true,
+        bike: {
+          include: {
+            model: true,
+            usedDetail: true
+          }
+        },
         createdBy: {
           select: { id: true, name: true, username: true }
         },
@@ -360,12 +354,13 @@ router.get('/:id', requirePermission('READ_SALES'), async (req: AuthenticatedReq
   }
 });
 
-// POST /api/sales - Create a sale transaction
+// POST /api/sales - Create a sale transaction (Normalized 3NF/BCNF Customer linkage)
 router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const {
       bikeId,
       saleType,
+      customerId,
       customerName,
       customerPhone,
       customerCnic,
@@ -406,18 +401,53 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
     const userId = req.user!.userId;
 
     const result = await prisma.$transaction(async (tx) => {
-      // 1. Update bike status to SOLD
+      // 1. Resolve or Create normalized Customer record (3NF/BCNF)
+      let resolvedCustomerId = customerId;
+
+      if (!resolvedCustomerId && customerPhone) {
+        const cleanPhone = customerPhone.trim();
+        const existingCust = await tx.customer.findUnique({
+          where: { phone: cleanPhone }
+        });
+
+        if (existingCust) {
+          resolvedCustomerId = existingCust.id;
+          if (customerCnic || customerAddress) {
+            await tx.customer.update({
+              where: { id: existingCust.id },
+              data: {
+                ...(customerCnic ? { cnic: customerCnic.trim() } : {}),
+                ...(customerAddress ? { address: customerAddress.trim() } : {})
+              }
+            });
+          }
+        } else {
+          const newCust = await tx.customer.create({
+            data: {
+              name: customerName.trim(),
+              phone: cleanPhone,
+              cnic: customerCnic?.trim() || null,
+              address: customerAddress?.trim() || null,
+              customerType: customerType || (saleType === 'B2B' ? 'DEALER' : 'RETAIL')
+            }
+          });
+          resolvedCustomerId = newCust.id;
+        }
+      }
+
+      // 2. Update bike status to SOLD
       await tx.bike.update({
         where: { id: bikeId },
         data: { status: 'SOLD' }
       });
 
-      // 2. Create Sale record
+      // 3. Create Sale record linked to normalized Customer
       const sale = await tx.sale.create({
         data: {
           invoiceNumber,
           saleType: saleType || 'B2C',
           bikeId,
+          customerId: resolvedCustomerId || null,
           customerName: customerName.trim(),
           customerPhone: customerPhone.trim(),
           customerCnic: customerCnic?.trim() || null,
@@ -436,7 +466,7 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
         }
       });
 
-      // 3. Record initial deposit if present
+      // 4. Record initial deposit if present
       if (depositNum > 0) {
         await tx.paymentTransaction.create({
           data: {
@@ -449,13 +479,14 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
         });
       }
 
-      // 4. If Credit/Installment sale, generate installment schedules
+      // 5. If Credit/Installment sale, batch generate installment schedules
       if (paymentType === 'CREDIT_INSTALLMENT' && installmentsCount > 0 && remainingBalance > 0) {
         const count = Number(installmentsCount);
         const monthlyAmount = Math.round((remainingBalance / count) * 100) / 100;
         let runningBalance = remainingBalance;
 
         const baseDate = firstInstallmentDueDate ? new Date(firstInstallmentDueDate) : new Date();
+        const installmentsData: any[] = [];
 
         for (let i = 1; i <= count; i++) {
           const dueDate = new Date(baseDate);
@@ -464,20 +495,22 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
           const instAmount = i === count ? runningBalance : monthlyAmount;
           runningBalance -= instAmount;
 
-          await tx.installmentSchedule.create({
-            data: {
-              saleId: sale.id,
-              installmentNumber: i,
-              dueDate,
-              amount: instAmount,
-              paidAmount: 0,
-              status: 'PENDING'
-            }
+          installmentsData.push({
+            saleId: sale.id,
+            installmentNumber: i,
+            dueDate,
+            amount: instAmount,
+            paidAmount: 0,
+            status: 'PENDING'
           });
         }
+
+        await tx.installmentSchedule.createMany({
+          data: installmentsData
+        });
       }
 
-      // 5. Auto-initialize registration paperwork
+      // 6. Batch auto-initialize registration paperwork
       const docTypes = [
         'SALES_CERTIFICATE',
         'DELIVERY_LETTER_GATE_PASS',
@@ -486,18 +519,19 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
         'REGISTRATION_APPLICATION'
       ];
 
-      for (const docType of docTypes) {
-        await tx.motorcycleDocument.create({
-          data: {
-            saleId: sale.id,
-            docType,
-            paperworkStatus: 'PENDING_MANUFACTURER',
-            statusNotes: 'Automatic registration pipeline initiated.'
-          }
-        });
-      }
+      await tx.motorcycleDocument.createMany({
+        data: docTypes.map((docType) => ({
+          saleId: sale.id,
+          docType,
+          paperworkStatus: 'PENDING_MANUFACTURER',
+          statusNotes: 'Automatic registration pipeline initiated.'
+        }))
+      });
 
       return sale;
+    }, {
+      maxWait: 15000,
+      timeout: 30000
     });
 
     await logAuditEvent(
@@ -511,7 +545,13 @@ router.post('/', requirePermission('CREATE_SALE'), validateBody(createSaleSchema
     const fullSale = await prisma.sale.findUnique({
       where: { id: result.id },
       include: {
-        bike: true,
+        customer: true,
+        bike: {
+          include: {
+            model: true,
+            usedDetail: true
+          }
+        },
         createdBy: { select: { id: true, name: true, username: true } },
         installments: true,
         payments: true,
@@ -589,16 +629,21 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), validateBody(reco
       req.user?.userId,
       'RECORD_PAYMENT',
       'SALES',
-      `Recorded payment of ${payAmount} for Invoice ${sale.invoiceNumber}`,
+      `Recorded payment of PKR ${payAmount} for Invoice ${sale.invoiceNumber} via ${paymentMethod}`,
       req.ip
     );
 
     const updatedSale = await prisma.sale.findUnique({
       where: { id },
       include: {
-        bike: true,
+        customer: true,
+        bike: {
+          include: { model: true, usedDetail: true }
+        },
+        createdBy: { select: { id: true, name: true, username: true } },
         installments: { orderBy: { installmentNumber: 'asc' } },
-        payments: { orderBy: { paymentDate: 'desc' } }
+        payments: { orderBy: { paymentDate: 'desc' } },
+        documents: true
       }
     });
 
@@ -609,8 +654,8 @@ router.post('/:id/payments', requirePermission('CREATE_SALE'), validateBody(reco
   }
 });
 
-// DELETE /api/sales/:id - Soft delete sale and release bike back to IN_STOCK (Admin/Manager only)
-router.delete('/:id', requireRole(['Admin', 'Manager']), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+// DELETE /api/sales/:id - Soft Delete a sale & restore bike status
+router.delete('/:id', requirePermission('CREATE_SALE'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
 
@@ -625,7 +670,7 @@ router.delete('/:id', requireRole(['Admin', 'Manager']), async (req: Authenticat
     }
 
     await prisma.$transaction(async (tx) => {
-      // 1. Soft delete sale
+      // Soft delete the sale
       await tx.sale.update({
         where: { id },
         data: {
@@ -635,27 +680,25 @@ router.delete('/:id', requireRole(['Admin', 'Manager']), async (req: Authenticat
         }
       });
 
-      // 2. Release bike back to IN_STOCK if not sold to someone else
-      if (sale.bikeId) {
-        await tx.bike.update({
-          where: { id: sale.bikeId },
-          data: { status: 'IN_STOCK' }
-        });
-      }
+      // Restore motorcycle status to IN_STOCK
+      await tx.bike.update({
+        where: { id: sale.bikeId },
+        data: { status: 'IN_STOCK' }
+      });
     });
 
     await logAuditEvent(
       req.user?.userId,
-      'SOFT_DELETE_SALE',
+      'DELETE_SALE',
       'SALES',
-      `Soft deleted sale ${sale.invoiceNumber} for customer ${sale.customerName}. Reverted bike ${sale.bike?.modelName} to IN_STOCK.`,
+      `Cancelled/Soft-deleted Sale ${sale.invoiceNumber} and returned Bike ${sale.bike?.modelName} to stock`,
       req.ip
     );
 
-    res.json({ message: 'Sale transaction cancelled and soft deleted successfully', id });
+    res.json({ message: 'Sale cancelled and soft-deleted successfully', id });
   } catch (err: any) {
-    console.error('Error soft deleting sale:', err);
-    res.status(500).json({ error: 'Failed to cancel sale transaction' });
+    console.error('Error deleting sale:', err);
+    res.status(500).json({ error: 'Failed to delete sale record' });
   }
 });
 

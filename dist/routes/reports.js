@@ -144,7 +144,11 @@ router.get('/export/bikes', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
     try {
         const bikes = await prisma_js_1.prisma.bike.findMany({
             where: { isDeleted: false },
-            orderBy: [{ status: 'asc' }, { modelName: 'asc' }]
+            orderBy: [{ status: 'asc' }, { modelName: 'asc' }],
+            include: {
+                model: true,
+                usedDetail: true
+            }
         });
         const workbook = new exceljs_1.default.Workbook();
         workbook.creator = 'AutoSuite ERP';
@@ -152,6 +156,7 @@ router.get('/export/bikes', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
         worksheet.columns = [
             { header: 'Type', key: 'type', width: 14 },
             { header: 'Model Name', key: 'modelName', width: 22 },
+            { header: 'Brand', key: 'brand', width: 16 },
             { header: 'Chassis Number', key: 'chassisNumber', width: 22 },
             { header: 'Engine Number', key: 'engineNumber', width: 22 },
             { header: 'Color', key: 'color', width: 14 },
@@ -170,6 +175,7 @@ router.get('/export/bikes', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
             worksheet.addRow({
                 type: b.type === 'BRAND_NEW' ? 'Brand New' : 'Used Certified',
                 modelName: b.modelName,
+                brand: b.model?.brand || 'Atlas Honda',
                 chassisNumber: b.chassisNumber,
                 engineNumber: b.engineNumber,
                 color: b.color,
@@ -178,10 +184,10 @@ router.get('/export/bikes', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
                 marketTarget: b.marketTarget,
                 dealerInvoicePrice: b.dealerInvoicePrice,
                 retailPrice: b.retailPrice,
-                registrationNumber: b.registrationNumber || '-',
-                conditionGrade: b.conditionGrade || '-',
-                prevOwnerName: b.prevOwnerName || '-',
-                prevOwnerPhone: b.prevOwnerPhone || '-'
+                registrationNumber: b.usedDetail?.registrationNumber || '-',
+                conditionGrade: b.usedDetail?.conditionGrade || '-',
+                prevOwnerName: b.usedDetail?.prevOwnerName || '-',
+                prevOwnerPhone: b.usedDetail?.prevOwnerPhone || '-'
             });
         });
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -199,7 +205,8 @@ router.get('/export/parts', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
     try {
         const parts = await prisma_js_1.prisma.part.findMany({
             where: { isDeleted: false },
-            orderBy: { partName: 'asc' }
+            orderBy: { partName: 'asc' },
+            include: { categoryRef: true }
         });
         const workbook = new exceljs_1.default.Workbook();
         workbook.creator = 'AutoSuite ERP';
@@ -221,7 +228,7 @@ router.get('/export/parts', (0, auth_js_1.requirePermission)('EXPORT_EXCEL'), as
             worksheet.addRow({
                 partCode: p.partCode,
                 partName: p.partName,
-                category: p.category || 'General',
+                category: p.categoryRef?.name || p.category || 'General',
                 compatibilityModel: p.compatibilityModel,
                 quantity: p.quantity,
                 reorderThreshold: p.reorderThreshold,
